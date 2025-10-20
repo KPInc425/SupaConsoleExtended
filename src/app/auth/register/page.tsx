@@ -7,6 +7,7 @@ import Image from 'next/image'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import SecretInput from '@/components/ui/secret-input'
 import { Label } from '@/components/ui/label'
 
 export default function RegisterPage() {
@@ -123,9 +124,8 @@ export default function RegisterPage() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
-              <Input
+              <SecretInput
                 id="password"
-                type="password"
                 placeholder="Enter your password"
                 value={password}
                 onChange={handlePasswordChange}
@@ -134,9 +134,8 @@ export default function RegisterPage() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="confirmPassword">Confirm Password</Label>
-              <Input
+              <SecretInput
                 id="confirmPassword"
-                type="password"
                 placeholder="Confirm your password"
                 value={confirmPassword}
                 onChange={handleConfirmPasswordChange}

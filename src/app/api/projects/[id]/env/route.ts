@@ -79,6 +79,14 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       )
     }
 
+    // Validate we don't accept obvious placeholder values like <JWT_SECRET>
+    const placeholderRegex = /^<.+>$/
+    for (const [k, v] of Object.entries(envVars)) {
+      if (typeof v === 'string' && placeholderRegex.test(v.trim())) {
+        return NextResponse.json({ error: `Placeholder value not allowed for ${k}` }, { status: 400 })
+      }
+    }
+
     const result = await updateProjectEnvVars(id, envVars)
 
     if (!result.success) {

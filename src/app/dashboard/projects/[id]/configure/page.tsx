@@ -7,6 +7,7 @@ import Image from 'next/image'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import SecretInput from '@/components/ui/secret-input'
 import { Label } from '@/components/ui/label'
 
 interface ConfigureProjectPageProps {
@@ -103,6 +104,7 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
   })
   const [loading, setLoading] = useState(false)
   const [deploying, setDeploying] = useState(false)
+      
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [projectId, setProjectId] = useState<string>('')
@@ -127,13 +129,14 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
       try {
         const response = await fetch(`/api/projects/${projectId}/env`)
         if (response.ok) {
-          const data = await response.json()
-          if (data.envVars && Object.keys(data.envVars).length > 0) {
+          const responseData = await response.json()
+          if (responseData.envVars && Object.keys(responseData.envVars).length > 0) {
             // Update state with existing environment variables
             setEnvVars(prev => ({
               ...prev,
-              ...data.envVars
+              ...responseData.envVars
             }))
+            // Capture original envs is no longer tracked in this UI
           }
         }
       } catch (error) {
@@ -154,25 +157,17 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
   }
 
   const handleGenerateSecrets = () => {
-    const jwtSecret = generateSecureKey(64)
+    // JWT_SECRET must be 40 characters for GoTrue
+    const jwtSecret = generateSecureKey(40)
     const projectId = `project-${Date.now()}`
-    
+
     setEnvVars(prev => ({
       ...prev,
       POSTGRES_PASSWORD: generateSecureKey(32),
       JWT_SECRET: jwtSecret,
-      ANON_KEY: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(JSON.stringify({
-        role: 'anon',
-        iss: 'supabase',
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + (365 * 24 * 60 * 60) // 1 year
-      }))}.${generateSecureKey(43)}`,
-      SERVICE_ROLE_KEY: `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${btoa(JSON.stringify({
-        role: 'service_role',
-        iss: 'supabase',
-        iat: Math.floor(Date.now() / 1000),
-        exp: Math.floor(Date.now() / 1000) + (365 * 24 * 60 * 60) // 1 year
-      }))}.${generateSecureKey(43)}`,
+      // Use opaque long random strings for anon/service_role keys (not pseudo-JWTs)
+      ANON_KEY: generateSecureKey(64),
+      SERVICE_ROLE_KEY: generateSecureKey(64),
       DASHBOARD_PASSWORD: generateSecureKey(16),
       SECRET_KEY_BASE: generateSecureKey(64),
       VAULT_ENC_KEY: generateSecureKey(32),
@@ -250,10 +245,25 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
       })
 
       if (response.ok) {
-        setSuccess('Project deployed successfully!')
+        const data = await response.json()
+        // If the deploy returned runtime status, surface useful URLs to the user
+        if (data.status) {
+          const status = data.status as Record<string, string>
+          const lines: string[] = []
+          if (status.API_URL) lines.push(`API: ${status.API_URL}`)
+          if (status.STUDIO_URL) lines.push(`Studio: ${status.STUDIO_URL}`)
+          if (status.INBUCKET_URL) lines.push(`Mail UI: ${status.INBUCKET_URL}`)
+          if (status.MAILPIT_URL) lines.push(`Mail UI: ${status.MAILPIT_URL}`)
+          if (status.DB_URL) lines.push(`DB: ${status.DB_URL}`)
+          setSuccess(`Project deployed successfully!\n${lines.join('\n')}`)
+        } else if (data.note) {
+          setSuccess(`Project deployed (partial): ${data.note}`)
+        } else {
+          setSuccess('Project deployed successfully!')
+        }
         setTimeout(() => {
           router.push('/dashboard')
-        }, 2000)
+        }, 2500)
       } else {
         const data = await response.json()
         setError(data.error || 'Failed to deploy project')
@@ -262,6 +272,99 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
       setError('An error occurred during deployment.')
     } finally {
       setDeploying(false)
+    }
+  }
+
+  // Deploy with live streaming logs (uses /api/projects/stream-logs which returns SSE)
+  const [logs, setLogs] = useState<string[]>([])
+  const [streaming, setStreaming] = useState(false)
+
+  const appendLog = (line: string) => {
+    setLogs(prev => [...prev, line])
+  }
+
+  const handleDeployWithLogs = async () => {
+    if (!projectId) return
+    setStreaming(true)
+    setDeploying(true)
+    setError('')
+    setLogs([])
+
+    try {
+      const resp = await fetch('/api/projects/stream-logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId }),
+      })
+
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}))
+        setError(data.error || 'Failed to start streaming logs')
+        return
+      }
+
+      const reader = resp.body?.getReader()
+      if (!reader) {
+        setError('No streaming body received')
+        return
+      }
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        // SSE messages are separated by double newlines
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() || ''
+
+        for (const part of parts) {
+          const lines = part.split(/\r?\n/).map(l => l.trim())
+          let event = ''
+          let data = ''
+          for (const line of lines) {
+            if (line.startsWith('event:')) event = line.slice('event:'.length).trim()
+            else if (line.startsWith('data:')) data += line.slice('data:'.length).trim()
+          }
+
+          // server sends JSON.stringify(data) for log/error messages
+          let decoded = data
+          try { decoded = JSON.parse(data) } catch {}
+
+          if (event === 'log') appendLog(String(decoded))
+          else if (event === 'error') appendLog(`[ERROR] ${String(decoded)}`)
+          else if (event === 'done') {
+            appendLog(`[DONE] ${String(decoded)}`)
+            // After done, attempt to fetch project status to show runtime URLs
+            try {
+              const st = await fetch(`/api/projects/${projectId}/status`)
+              if (st.ok) {
+                const stJson = await st.json()
+                const lines: string[] = []
+                if (stJson.API_URL) lines.push(`API: ${stJson.API_URL}`)
+                if (stJson.STUDIO_URL) lines.push(`Studio: ${stJson.STUDIO_URL}`)
+                if (stJson.INBUCKET_URL) lines.push(`Mail UI: ${stJson.INBUCKET_URL}`)
+                if (stJson.MAILPIT_URL) lines.push(`Mail UI: ${stJson.MAILPIT_URL}`)
+                if (stJson.DB_URL) lines.push(`DB: ${stJson.DB_URL}`)
+                setSuccess(`Project deployed successfully!\n${lines.join('\n')}`)
+              } else {
+                setSuccess('Project deployed (stream finished).')
+              }
+            } catch {
+              setSuccess('Project deployed (stream finished).')
+            }
+          }
+        }
+      }
+    } catch {
+      setError('An unknown error occurred during streaming deploy')
+    } finally {
+      setStreaming(false)
+      setDeploying(false)
+      // keep logs visible to the user
     }
   }
 
@@ -332,18 +435,16 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="postgres_password">PostgreSQL Password</Label>
-                    <Input
+                    <SecretInput
                       id="postgres_password"
-                      type="password"
                       value={envVars.POSTGRES_PASSWORD}
                       onChange={createInputHandler('POSTGRES_PASSWORD')}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="jwt_secret">JWT Secret</Label>
-                    <Input
+                    <SecretInput
                       id="jwt_secret"
-                      type="password"
                       value={envVars.JWT_SECRET}
                       onChange={createInputHandler('JWT_SECRET')}
                     />
@@ -361,25 +462,23 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
                     <Label htmlFor="dashboard_password">Dashboard Password</Label>
                     <Input
                       id="dashboard_password"
-                      type="password"
+                      type="text"
                       value={envVars.DASHBOARD_PASSWORD}
                       onChange={createInputHandler('DASHBOARD_PASSWORD')}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="secret_key_base">Secret Key Base</Label>
-                    <Input
+                    <SecretInput
                       id="secret_key_base"
-                      type="password"
                       value={envVars.SECRET_KEY_BASE}
                       onChange={createInputHandler('SECRET_KEY_BASE')}
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="vault_enc_key">Vault Encryption Key</Label>
-                    <Input
+                    <SecretInput
                       id="vault_enc_key"
-                      type="password"
                       value={envVars.VAULT_ENC_KEY}
                       onChange={createInputHandler('VAULT_ENC_KEY')}
                     />
@@ -409,9 +508,8 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="service_role_key">Service Role Key (Secret)</Label>
-                    <Input
+                    <SecretInput
                       id="service_role_key"
-                      type="password"
                       value={envVars.SERVICE_ROLE_KEY}
                       onChange={createInputHandler('SERVICE_ROLE_KEY')}
                     />
@@ -559,9 +657,8 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="smtp_pass">SMTP Password</Label>
-                    <Input
+                    <SecretInput
                       id="smtp_pass"
-                      type="password"
                       value={envVars.SMTP_PASS}
                       onChange={createInputHandler('SMTP_PASS')}
                     />
@@ -641,9 +738,8 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label htmlFor="openai_api_key">OpenAI API Key (Optional)</Label>
-                    <Input
+                    <SecretInput
                       id="openai_api_key"
-                      type="password"
                       placeholder="For SQL Editor Assistant"
                       value={envVars.OPENAI_API_KEY}
                       onChange={createInputHandler('OPENAI_API_KEY')}
@@ -739,6 +835,26 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
                         </div>
                       )}
                     </Button>
+                      <Button 
+                        onClick={handleDeployWithLogs}
+                        disabled={deploying}
+                        variant="ghost"
+                        title="You can stream logs without saving changes; saving is recommended"
+                      >
+                        {streaming ? (
+                          <div className="flex items-center gap-2">
+                            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"></div>
+                            Streaming...
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M12 19a7 7 0 100-14 7 7 0 000 14z" />
+                            </svg>
+                            Deploy (stream logs)
+                          </div>
+                        )}
+                      </Button>
                   </div>
 
                   {systemChecks && (
@@ -774,7 +890,12 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
                       )}
                     </div>
                   )}
-                  
+                  {/* Live logs panel (shown when streaming or after stream completes) */}
+                  {(streaming || logs.length > 0) && (
+                    <div className="mt-4 bg-black text-white p-3 rounded font-mono text-sm max-h-64 overflow-auto">
+                      {logs.length === 0 ? (<div>Starting stream...</div>) : logs.map((l, i) => <div key={i}>{l}</div>)}
+                    </div>
+                  )}
                   {!success && (
                     <p className="text-sm text-muted-foreground">
                       Save configuration first before deploying

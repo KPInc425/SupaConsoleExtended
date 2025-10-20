@@ -6,6 +6,7 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
+import SecretInput from '@/components/ui/secret-input'
 import { Label } from '@/components/ui/label'
 
 export default function LoginPage() {
@@ -79,9 +80,8 @@ export default function LoginPage() {
             </div>
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
-              <Input
+              <SecretInput
                 id="password"
-                type="password"
                 placeholder="Enter your password"
                 value={password}
                 onChange={handlePasswordChange}

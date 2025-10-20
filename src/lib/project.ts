@@ -3,8 +3,111 @@ import * as path from 'path'
 import { exec } from 'child_process'
 import { promisify } from 'util'
 import { prisma } from './db'
+import { isSupabaseCliAvailable } from './cli'
+import TOML from '@iarna/toml'
+import * as net from 'net'
 
 const execAsync = promisify(exec)
+
+// Update supabase/config.toml with new port values if present
+export async function updateSupabaseConfig(projectRoot: string, env: Record<string,string>) {
+  const cfgPath = path.join(projectRoot, 'supabase', 'config.toml')
+  try {
+    let txt = ''
+    try {
+      txt = await fs.readFile(cfgPath, 'utf8')
+    } catch {
+      // If the config doesn't exist, create a minimal one so the CLI will honor port overrides
+      // Use canonical 'port' fields (not http_port/web_port) to match the CLI's expected keys.
+  const minimal: Record<string, unknown> = {
+        db: { port: env.POSTGRES_PORT ? Number(env.POSTGRES_PORT) : 5432 },
+        kong: { port: env.KONG_HTTP_PORT ? Number(env.KONG_HTTP_PORT) : 54321 },
+        studio: { port: env.STUDIO_PORT ? Number(env.STUDIO_PORT) : 54323 },
+        inbucket: { port: env.INBUCKET_WEB_PORT ? Number(env.INBUCKET_WEB_PORT) : 54324, smtp_port: env.INBUCKET_SMTP_PORT ? Number(env.INBUCKET_SMTP_PORT) : 1025 },
+        analytics: { port: env.ANALYTICS_PORT ? Number(env.ANALYTICS_PORT) : 54325 }
+      }
+      txt = TOML.stringify(minimal)
+      try { await fs.mkdir(path.join(projectRoot, 'supabase'), { recursive: true }) } catch {}
+      await fs.writeFile(cfgPath, txt, 'utf8')
+    }
+    // Parse TOML safely
+  let parsed: Record<string, unknown> | undefined
+    try {
+      parsed = TOML.parse(txt) as Record<string, unknown>
+    } catch {
+      // If parsing fails, fall back to no-op to avoid corrupting the file
+      return
+    }
+
+    // Helper to set nested keys by name if present in parsed TOML
+    const setIfPresent = (keyPaths: string[][], value: string) => {
+        for (const pathParts of keyPaths) {
+        let node: unknown = parsed
+        for (let i = 0; i < pathParts.length - 1; i++) {
+          const part = pathParts[i]
+          if ((node as Record<string, unknown>)?.[part] === undefined) {
+            node = undefined
+            break
+          }
+          node = (node as Record<string, unknown>)[part]
+        }
+        if (!node) continue
+        const last = pathParts[pathParts.length - 1]
+        // Only set if key exists or if node is an object
+        if (typeof node === 'object') {
+          // Do not overwrite values that are env(var) placeholders in TOML
+          // The TOML parser represents quoted strings as string values, so detect those
+          // and skip them to preserve env-driven templates.
+          const n = node as Record<string, unknown>
+          const existing = n[last]
+          if (typeof existing === 'string' && /^env\(.+\)$/.test(existing)) {
+            // preserve existing env(...) placeholder
+          } else {
+            n[last] = Number(value) as unknown
+          }
+        }
+      }
+    }
+
+    // Update common DB/API/studio/mailpit port fields if POSTGRES_PORT or other envs set
+    const mapping: Record<string, string[][]> = {
+      POSTGRES_PORT: [['db', 'port'], ['postgres', 'port'], ['database', 'port'], ['postgrest', 'port']],
+      KONG_HTTP_PORT: [['api', 'port'], ['kong', 'port'], ['gateway', 'port']],
+      STUDIO_PORT: [['studio', 'port']],
+      INBUCKET_WEB_PORT: [['inbucket', 'port']],
+      INBUCKET_SMTP_PORT: [['inbucket', 'smtp_port']],
+      ANALYTICS_PORT: [['analytics', 'port']],
+    }
+
+    for (const [envKey, paths] of Object.entries(mapping)) {
+      if (env[envKey]) setIfPresent(paths, env[envKey])
+    }
+
+    // Also attempt a best-effort recursive update: if any table contains a 'port' or key ending with '_port',
+    // and the env contains a corresponding variable (by heuristic), set it. This covers variations in config.
+    const heuristics = (node: unknown) => {
+      if (!node || typeof node !== 'object') return
+      for (const k of Object.keys(node as Record<string, unknown>)) {
+        const v = (node as Record<string, unknown>)[k]
+        if (k === 'port' || k.endsWith('_port')) {
+          const candidate = k.toUpperCase()
+          if (env[candidate]) {
+            ;(node as Record<string, unknown>)[k] = Number(env[candidate]) as unknown
+          }
+        }
+        if (typeof v === 'object') heuristics(v)
+      }
+    }
+
+    heuristics(parsed)
+
+    // Stringify back to TOML and write
+    const out = TOML.stringify(parsed)
+    await fs.writeFile(cfgPath, out, 'utf8')
+  } catch {
+    // ignore if file doesn't exist or IO fails
+  }
+}
 
 // Helper functions for generating secure defaults
 function generateRandomString(length: number): string {
@@ -16,18 +119,7 @@ function generateRandomString(length: number): string {
   return result
 }
 
-function generateJWT(role: 'anon' | 'service_role', timestamp: number): string {
-  // Generate a simple JWT-like token (for demo purposes)
-  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url')
-  const payload = Buffer.from(JSON.stringify({
-    role,
-    iss: 'supabase',
-    iat: Math.floor(timestamp / 1000),
-    exp: Math.floor(timestamp / 1000) + (365 * 24 * 60 * 60) // 1 year
-  })).toString('base64url')
-  const signature = generateRandomString(43) // Mock signature
-  return `${header}.${payload}.${signature}`
-}
+
 
 // Pre-flight checks for Docker deployment
 async function checkDockerPrerequisites() {
@@ -110,6 +202,52 @@ async function checkInternetConnectivity(): Promise<boolean> {
   return false
 }
 
+// Port utility: check if a TCP port on localhost is available
+export async function isPortAvailable(port: number, host = '127.0.0.1'): Promise<boolean> {
+  // First, check if Docker reports the port as published by any container.
+  try {
+    const { stdout } = await execAsync('docker ps --format "{{.Ports}}"', { timeout: 3000 })
+    if (stdout && stdout.includes(`:${port}`)) {
+      return false
+    }
+  } catch {
+    // If docker isn't available or the command fails, continue to TCP bind checks
+  }
+
+  // Try binding on multiple interfaces to detect a real conflict (0.0.0.0 vs 127.0.0.1 differences)
+  const hostsToTry = [host, '0.0.0.0', '::1']
+  for (const h of hostsToTry) {
+    const ok = await new Promise<boolean>(resolve => {
+      const server = net.createServer()
+      let done = false
+      const cleanup = () => {
+        try { server.close() } catch {}
+      }
+      server.once('error', () => { if (!done) { done = true; cleanup(); resolve(false) } })
+      server.once('listening', () => { if (!done) { done = true; cleanup(); resolve(true) } })
+      try {
+        server.listen(port, h)
+      } catch {
+        if (!done) { done = true; cleanup(); resolve(false) }
+      }
+      setTimeout(() => { if (!done) { done = true; cleanup(); resolve(false) } }, 1000)
+    })
+    if (!ok) return false
+  }
+
+  return true
+}
+
+// Try to find a basePort where a set of offsets are free. Returns number or null
+export async function findAvailableBasePort(start: number, offsets: number[], attempts = 100): Promise<number | null> {
+  for (let i = 0; i < attempts; i++) {
+    const candidate = start + i * 10
+    const checks = await Promise.all(offsets.map(off => isPortAvailable(candidate + off)))
+    if (checks.every(Boolean)) return candidate
+  }
+  return null
+}
+
 export async function initializeSupabaseCore() {
   const coreDir = path.join(process.cwd(), 'supabase-core')
   const projectsDir = path.join(process.cwd(), 'supabase-projects')
@@ -124,12 +262,17 @@ export async function initializeSupabaseCore() {
       await fs.mkdir(projectsDir, { recursive: true })
     }
     
-    // Clone repository if supabase-core doesn't exist
+    // We no longer clone the full supabase-core repository as the CLI handles runtime artifacts.
+    // Create a minimal placeholder for developer guidance if the directory doesn't exist.
     if (!coreExists) {
-      const repoUrl = process.env.SUPABASE_CORE_REPO_URL || 'https://github.com/supabase/supabase'
-      
-      // Use shallow clone for faster download
-      await execAsync(`git clone --depth 1 ${repoUrl} supabase-core`)
+      await fs.mkdir(coreDir, { recursive: true })
+      const readme = `This folder previously contained a clone of the Supabase monorepo.
+The project now relies on the Supabase CLI for local orchestration.
+
+If you need the full supabase repository for debugging or development, clone it manually:
+  git clone https://github.com/supabase/supabase supabase-core
+`
+      try { await fs.writeFile(path.join(coreDir, 'README.md'), readme, 'utf8') } catch {}
     }
     
     return { success: true }
@@ -140,161 +283,105 @@ export async function initializeSupabaseCore() {
 }
 
 export async function createProject(name: string, userId: string, description?: string) {
+  // New flow: use supabase CLI exclusively to create and start projects
   try {
+    const cli = await isSupabaseCliAvailable()
+    if (!cli.available) {
+      throw new Error('Supabase CLI is not installed or not available in PATH. Please install it and try again.')
+    }
+
     // Generate unique slug
     const timestamp = Date.now()
     const slug = `${name.toLowerCase().replace(/[^a-z0-9]/g, '-')}-${timestamp}`
-    
-    // Create project in database
+
+    // Create project record in DB
     const project = await prisma.project.create({
-      data: {
-        name,
-        slug,
-        description,
-        ownerId: userId,
-      },
+      data: { name, slug, description, ownerId: userId }
     })
-    
+
     // Create project directory
     const projectDir = path.join(process.cwd(), 'supabase-projects', slug)
-    const coreDockerDir = path.join(process.cwd(), 'supabase-core', 'docker')
-    
-    // Copy docker folder from supabase-core
     await fs.mkdir(projectDir, { recursive: true })
-    
-    // Use cross-platform copy command
-    const isWindows = process.platform === 'win32'
-    const copyCommand = isWindows 
-      ? `xcopy "${coreDockerDir}" "${path.join(projectDir, 'docker')}" /E /I /H /K`
-      : `cp -r "${coreDockerDir}" "${projectDir}/"`
-      
-    await execAsync(copyCommand)
-    
-    // Customize docker-compose.yml with unique container names
-    const dockerComposeFile = path.join(projectDir, 'docker', 'docker-compose.yml')
-    let dockerComposeContent = await fs.readFile(dockerComposeFile, 'utf8')
-    
-    // Replace container names with project-specific names
-    const containerMappings = [
-      { original: 'supabase-studio', replacement: `${slug}-studio` },
-      { original: 'supabase-kong', replacement: `${slug}-kong` },
-      { original: 'supabase-auth', replacement: `${slug}-auth` },
-      { original: 'supabase-rest', replacement: `${slug}-rest` },
-      { original: 'realtime-dev.supabase-realtime', replacement: `realtime-dev.${slug}-realtime` },
-      { original: 'supabase-storage', replacement: `${slug}-storage` },
-      { original: 'supabase-imgproxy', replacement: `${slug}-imgproxy` },
-      { original: 'supabase-meta', replacement: `${slug}-meta` },
-      { original: 'supabase-edge-functions', replacement: `${slug}-edge-functions` },
-      { original: 'supabase-analytics', replacement: `${slug}-analytics` },
-      { original: 'supabase-db', replacement: `${slug}-db` },
-      { original: 'supabase-vector', replacement: `${slug}-vector` },
-      { original: 'supabase-pooler', replacement: `${slug}-pooler` }
-    ]
-    
-    // Replace container names in the compose file
-    for (const mapping of containerMappings) {
-      dockerComposeContent = dockerComposeContent.replace(
-        new RegExp(`container_name: ${mapping.original}`, 'g'),
-        `container_name: ${mapping.replacement}`
-      )
+
+    // Generate envs and write .env (both project root and docker for compatibility)
+    // Choose a basePort and ensure required service ports are free to avoid collisions
+    const initialBase = 8000 + (timestamp % 10000)
+    const requiredOffsets = [0, 100, 1000, 1100, 1101, 2000]
+    const foundBase = await findAvailableBasePort(initialBase, requiredOffsets, 200)
+    if (!foundBase) {
+      throw new Error('Failed to find an available base port for the new project. Please free local ports or try again.')
     }
-    
-    // Update the compose project name to be unique
-    dockerComposeContent = dockerComposeContent.replace(
-      /^name: supabase$/m,
-      `name: ${slug}`
-    )
-    
-    
-    // Write the modified docker-compose.yml back
-    await fs.writeFile(dockerComposeFile, dockerComposeContent)
-    
-    // Generate unique default port values to prevent conflicts
-    const basePort = 8000 + (timestamp % 10000) // Use last 4 digits of timestamp for uniqueness
-    const defaultEnvVars = {
-      // Secrets - generated random values
+    const basePort = foundBase
+    const defaultEnvVars: Record<string, string> = {
       POSTGRES_PASSWORD: generateRandomString(32),
-      JWT_SECRET: generateRandomString(64),
-      ANON_KEY: generateJWT('anon', timestamp),
-      SERVICE_ROLE_KEY: generateJWT('service_role', timestamp),
+      JWT_SECRET: generateRandomString(40),
+      ANON_KEY: generateRandomString(64),
+      SERVICE_ROLE_KEY: generateRandomString(64),
       DASHBOARD_USERNAME: 'supabase',
       DASHBOARD_PASSWORD: generateRandomString(16),
       SECRET_KEY_BASE: generateRandomString(64),
       VAULT_ENC_KEY: generateRandomString(32),
-      
-      // Unique ports to prevent conflicts between projects
       POSTGRES_PORT: (basePort + 2000).toString(),
-      POOLER_PROXY_PORT_TRANSACTION: (basePort + 3000).toString(),
       KONG_HTTP_PORT: basePort.toString(),
-      KONG_HTTPS_PORT: (basePort + 443).toString(),
       ANALYTICS_PORT: (basePort + 1000).toString(),
-      
-      // Database
+      INBUCKET_WEB_PORT: (basePort + 1100).toString(),
+      INBUCKET_SMTP_PORT: (basePort + 1101).toString(),
       POSTGRES_HOST: 'db',
       POSTGRES_DB: 'postgres',
-      
-      // Other defaults
-      POOLER_DEFAULT_POOL_SIZE: '20',
-      POOLER_MAX_CLIENT_CONN: '100',
-      POOLER_TENANT_ID: `project-${timestamp}`,
-      POOLER_DB_POOL_SIZE: '5',
-      PGRST_DB_SCHEMAS: 'public,storage,graphql_public',
       SITE_URL: `http://localhost:${basePort}`,
-      ADDITIONAL_REDIRECT_URLS: '',
-      JWT_EXPIRY: '3600',
-      DISABLE_SIGNUP: 'false',
       API_EXTERNAL_URL: `http://localhost:${basePort}`,
-      MAILER_URLPATHS_CONFIRMATION: '/auth/v1/verify',
       MAILER_URLPATHS_INVITE: '/auth/v1/verify',
-      MAILER_URLPATHS_RECOVERY: '/auth/v1/verify',
-      MAILER_URLPATHS_EMAIL_CHANGE: '/auth/v1/verify',
-      ENABLE_EMAIL_SIGNUP: 'true',
-      ENABLE_EMAIL_AUTOCONFIRM: 'false',
+      SMTP_HOST: 'inbucket',
+      SMTP_PORT: (basePort + 1101).toString(),
       SMTP_ADMIN_EMAIL: 'admin@example.com',
-      SMTP_HOST: 'supabase-mail',
-      SMTP_PORT: '2500',
-      SMTP_USER: 'fake_mail_user',
-      SMTP_PASS: 'fake_mail_password',
-      SMTP_SENDER_NAME: 'fake_sender',
-      ENABLE_ANONYMOUS_USERS: 'false',
-      ENABLE_PHONE_SIGNUP: 'true',
-      ENABLE_PHONE_AUTOCONFIRM: 'true',
-      STUDIO_DEFAULT_ORGANIZATION: 'Default Organization',
-      STUDIO_DEFAULT_PROJECT: 'Default Project',
       STUDIO_PORT: (basePort + 100).toString(),
       SUPABASE_PUBLIC_URL: `http://localhost:${basePort}`,
-      IMGPROXY_ENABLE_WEBP_DETECTION: 'true',
-      OPENAI_API_KEY: '',
+      ENABLE_EMAIL_SIGNUP: 'true',
+      ENABLE_PHONE_SIGNUP: 'true',
       FUNCTIONS_VERIFY_JWT: 'false',
-      LOGFLARE_PUBLIC_ACCESS_TOKEN: generateRandomString(64),
-      LOGFLARE_PRIVATE_ACCESS_TOKEN: generateRandomString(64),
-      DOCKER_SOCKET_LOCATION: '/var/run/docker.sock',
-      GOOGLE_PROJECT_ID: 'GOOGLE_PROJECT_ID',
-      GOOGLE_PROJECT_NUMBER: 'GOOGLE_PROJECT_NUMBER'
+      PROJECT_ID: slug,
     }
-    
-    // Write initial .env file with unique defaults
-    const envFilePath = path.join(projectDir, 'docker', '.env')
-    const envContent = Object.entries(defaultEnvVars)
-      .map(([key, value]) => `${key}=${value}`)
-      .join('\n')
-    
-    await fs.writeFile(envFilePath, envContent)
-    
-    // Save environment variables to database
+
+    const envText = Object.entries(defaultEnvVars).map(([k, v]) => `${k}=${v}`).join('\n')
+    await fs.writeFile(path.join(projectDir, '.env'), envText)
+    const dockerEnvDir = path.join(projectDir, 'docker')
+    await fs.mkdir(dockerEnvDir, { recursive: true })
+    await fs.writeFile(path.join(dockerEnvDir, '.env'), envText)
+
+    // Persist envs to DB
     for (const [key, value] of Object.entries(defaultEnvVars)) {
-      await prisma.projectEnvVar.create({
-        data: {
-          projectId: project.id,
-          key,
-          value,
-        },
-      })
+      await prisma.projectEnvVar.create({ data: { projectId: project.id, key, value } })
     }
-    
+
+    // If a repository-level config.toml template exists, copy it into the project so the CLI has a valid
+    // starting point and we can safely merge port overrides into it.
+    try {
+      const repoCfg = path.join(process.cwd(), 'config.toml')
+      const projectSupabaseDir = path.join(projectDir, 'supabase')
+      const projectCfg = path.join(projectSupabaseDir, 'config.toml')
+      try {
+        // check repo template exists
+        await fs.access(repoCfg)
+        await fs.mkdir(projectSupabaseDir, { recursive: true })
+        const template = await fs.readFile(repoCfg, 'utf8')
+        await fs.writeFile(projectCfg, template, 'utf8')
+        // Merge initial ports into the copied config so the CLI honors them
+        try { await updateSupabaseConfig(projectDir, defaultEnvVars) } catch {}
+      } catch {
+        // no template present; skip
+      }
+    } catch {
+      // ignore filesystem errors
+    }
+
+    // We intentionally do NOT start the Supabase CLI here.
+    // Creation now only persists DB records and .env files. Actual stack startup is performed
+    // when the user triggers Deploy (handled in deployProject).
+    await prisma.project.update({ where: { id: project.id }, data: { status: 'created' } })
+
     return { success: true, project }
   } catch (error) {
-    console.error('Failed to create project:', error)
+    console.error('Failed to create project via CLI:', error)
     return { success: false, error: error instanceof Error ? error.message : 'Unknown error' }
   }
 }
@@ -309,8 +396,16 @@ export async function updateProjectEnvVars(projectId: string, envVars: Record<st
       throw new Error('Project not found')
     }
     
-    // Update environment variables in database
-    for (const [key, value] of Object.entries(envVars)) {
+    // Read existing env vars from DB so we merge updates instead of overwriting
+    const existingEnvRows = await prisma.projectEnvVar.findMany({ where: { projectId } })
+    const existingEnv: Record<string, string> = {}
+    existingEnvRows.forEach(r => { existingEnv[r.key] = r.value })
+
+    // Merge: incoming envVars overwrite existing keys; missing keys are preserved
+    const mergedEnv: Record<string, string> = { ...existingEnv, ...envVars }
+
+    // Upsert all merged env vars into DB (preserve any keys not present in the incoming payload)
+    for (const [key, value] of Object.entries(mergedEnv)) {
       await prisma.projectEnvVar.upsert({
         where: {
           projectId_key: {
@@ -326,15 +421,15 @@ export async function updateProjectEnvVars(projectId: string, envVars: Record<st
         },
       })
     }
-    
-    // Update .env file in project directory
-    const projectDir = path.join(process.cwd(), 'supabase-projects', project.slug, 'docker')
-    const envFilePath = path.join(projectDir, '.env')
-    
-    const envContent = Object.entries(envVars)
+
+    // Update .env file in project directory with merged content
+  const projectRoot = path.join(process.cwd(), 'supabase-projects', project.slug)
+  const envFilePath = path.join(projectRoot, '.env')
+
+    const envContent = Object.entries(mergedEnv)
       .map(([key, value]) => `${key}=${value}`)
       .join('\n')
-    
+
     await fs.writeFile(envFilePath, envContent)
     
     return { success: true }
@@ -354,9 +449,10 @@ export async function deployProject(projectId: string) {
       throw new Error('Project not found')
     }
     
-    const projectDir = path.join(process.cwd(), 'supabase-projects', project.slug, 'docker')
+  const projectRoot = path.join(process.cwd(), 'supabase-projects', project.slug)
+  const projectDockerDir = path.join(projectRoot, 'docker')
     
-    // Run pre-flight checks
+  // Run pre-flight checks
     console.log('Running pre-flight checks...')
     const checks = await checkDockerPrerequisites()
     
@@ -368,71 +464,320 @@ export async function deployProject(projectId: string) {
       throw new Error('Docker Compose is not available. Please ensure Docker Desktop includes Docker Compose or install it separately.')
     }
     
-    // Try to run Docker commands with better error handling
-    try {
-      // Only pull images if we have internet connectivity
-      if (checks.internetConnection) {
-        console.log('Attempting to pull latest Docker images...')
-        try {
-          await execAsync('docker compose pull', { 
-            cwd: projectDir, 
-            timeout: 300000, // 5 minute timeout
-            maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+      // Use supabase CLI to start the stack (CLI creates/manages compose files)
+      try {
+        // Read .env file to pick up configured ports
+          const envPath = path.join(projectRoot, '.env')
+        let envText = ''
+        try { envText = await fs.readFile(envPath, 'utf8') } catch {}
+        const parseEnv = (text: string) => {
+          const out: Record<string,string> = {}
+          text.split(/\r?\n/).forEach(line => {
+            const idx = line.indexOf('=')
+            if (idx > 0) {
+              out[line.slice(0, idx)] = line.slice(idx+1)
+            }
           })
-        } catch (pullError) {
-          console.warn('Failed to pull some images, will try to use existing/cached images:', pullError)
-          // Continue with deployment even if pull fails
+          return out
         }
-      } else {
-        console.warn('No internet connectivity detected, using cached Docker images')
-      }
-      
-      // Start the services
-      console.log('Starting Supabase services...')
-      await execAsync('docker compose up -d --remove-orphans', { 
-        cwd: projectDir, 
-        timeout: 300000, // 5 minute timeout
-        maxBuffer: 1024 * 1024 * 10 // 10MB buffer
-      })
-      
-    } catch (composeError) {
-      // If the main docker compose command fails, provide better error message
-      const errorMessage = composeError instanceof Error ? composeError.message : 'Unknown Docker error'
-      
-      if (errorMessage.includes('maxBuffer length exceeded')) {
-        throw new Error('Docker deployment generated too much output. This usually means the deployment is working but Docker is downloading many large images. Please wait a few more minutes and check Docker Desktop to see if containers are starting. You can also try running "docker compose up -d" manually in the project directory.')
-      } else if (errorMessage.includes('no such host') || errorMessage.includes('dial tcp')) {
-        throw new Error('Network connectivity issue: Unable to reach Docker registry. This might be due to:\n\n1. Internet connection issues\n2. Corporate firewall blocking Docker registry\n3. DNS resolution problems\n\nSolution: Try running "docker pull supabase/postgres" manually to test connectivity, or work with your IT team to allow access to Docker Hub.')
-      } else if (errorMessage.includes('permission denied')) {
-        throw new Error('Docker permission denied. Please ensure:\n\n1. Docker Desktop is running\n2. Your user is in the "docker" group (Linux/Mac)\n3. You have administrator privileges (Windows)')
-      } else if (errorMessage.includes('not found')) {
-        throw new Error('Docker or Docker Compose not found. Please install Docker Desktop from https://docker.com/products/docker-desktop')
-      } else if (errorMessage.includes('image') && errorMessage.includes('not found')) {
-        throw new Error('Required Docker images not found. Please ensure you have internet connectivity and try again, or manually pull images with "docker compose pull"')
-      } else {
-        throw new Error(`Docker deployment failed: ${errorMessage}`)
-      }
-    }
-    
-    // Verify that containers are running
+        const fileEnv = parseEnv(envText)
+        const portsToCheck: number[] = []
+        if (fileEnv.POSTGRES_PORT) portsToCheck.push(Number(fileEnv.POSTGRES_PORT))
+        if (fileEnv.STUDIO_PORT) portsToCheck.push(Number(fileEnv.STUDIO_PORT))
+        if (fileEnv.INBUCKET_WEB_PORT) portsToCheck.push(Number(fileEnv.INBUCKET_WEB_PORT))
+        if (fileEnv.ANALYTICS_PORT) portsToCheck.push(Number(fileEnv.ANALYTICS_PORT))
+        if (fileEnv.KONG_HTTP_PORT) portsToCheck.push(Number(fileEnv.KONG_HTTP_PORT))
+
+        const occupied = [] as number[]
+        for (const p of portsToCheck) {
+          try {
+            const ok = await isPortAvailable(p)
+            if (!ok) occupied.push(p)
+          } catch {
+            occupied.push(p)
+          }
+        }
+
+        if (occupied.length > 0) {
+          // Find a new base port that frees the required offsets
+          const initialBase = 8000 + (Date.now() % 10000)
+          const offsets = [0, 100, 1000, 1100, 1101, 2000]
+          const newBase = await findAvailableBasePort(initialBase, offsets, 200)
+          if (!newBase) throw new Error('Port(s) in use and unable to find alternative base port. Free ports or configure custom ports in the project settings.')
+
+          // Update env file and DB env vars to the new base
+          const updatedEnv = { ...fileEnv }
+          updatedEnv.ANALYTICS_PORT = String(newBase + 1000)
+          updatedEnv.INBUCKET_WEB_PORT = String(newBase + 1100)
+          updatedEnv.INBUCKET_SMTP_PORT = String(newBase + 1101)
+          updatedEnv.STUDIO_PORT = String(newBase + 100)
+
+          const envLines = Object.entries(updatedEnv).map(([k,v]) => `${k}=${v}`).join('\n')
+          try { await fs.writeFile(envPath, envLines, 'utf8') } catch {}
+            try { await fs.writeFile(path.join(projectDockerDir, '.env'), envLines, 'utf8') } catch {}
+
+          // Also update supabase/config.toml if present so CLI picks up the new DB port
+          try { await updateSupabaseConfig(path.join(process.cwd(), 'supabase-projects', project.slug), updatedEnv) } catch {}
+
+          // Persist updated env vars into DB
+          for (const [k, v] of Object.entries(updatedEnv)) {
+            try {
+              await prisma.projectEnvVar.upsert({ where: { projectId_key: { projectId, key: k } }, update: { value: v }, create: { projectId, key: k, value: v } })
+            } catch {
+              // continue
+            }
+          }
+        }
+
+        // Ensure CLI is available
+        const cli = await isSupabaseCliAvailable()
+        if (!cli.available) throw new Error('Supabase CLI not available in PATH')
+
+        // Final pre-start verification: re-check ports immediately before starting the CLI.
+        // This helps avoid a race where ports become occupied between the initial probe and `supabase start`.
+        const finalOffsets = [0, 100, 1000, 1100, 1101, 2000]
+        const maxRetries = 3
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          const conflicts: number[] = []
+          for (const p of portsToCheck) {
+            try {
+              const ok = await isPortAvailable(p)
+              if (!ok) conflicts.push(p)
+            } catch {
+              conflicts.push(p)
+            }
+          }
+
+          if (conflicts.length === 0) break // ports still free; proceed to start
+
+          // Try to find a new base port and rewrite env files & DB
+          const attemptBase = 8000 + (Date.now() % 10000)
+          const newBase = await findAvailableBasePort(attemptBase, finalOffsets, 200)
+          if (!newBase) {
+            if (attempt === maxRetries - 1) {
+              throw new Error('Port(s) in use and unable to find alternative base port. Free ports or configure custom ports in the project settings.')
+            }
+            // small backoff before retry
+            await new Promise(r => setTimeout(r, 250))
+            continue
+          }
+
+          // Update fileEnv with the chosen base and persist to disk + DB
+          fileEnv.POSTGRES_PORT = String(newBase + 2000)
+          fileEnv.KONG_HTTP_PORT = String(newBase)
+          fileEnv.ANALYTICS_PORT = String(newBase + 1000)
+          fileEnv.INBUCKET_WEB_PORT = String(newBase + 1100)
+          fileEnv.INBUCKET_SMTP_PORT = String(newBase + 1101)
+          fileEnv.STUDIO_PORT = String(newBase + 100)
+
+          const newEnvLines = Object.entries(fileEnv).map(([k, v]) => `${k}=${v}`).join('\n')
+          try { await fs.writeFile(envPath, newEnvLines, 'utf8') } catch {}
+          try { await fs.writeFile(path.join(projectDockerDir, '.env'), newEnvLines, 'utf8') } catch {}
+
+          for (const [k, v] of Object.entries(fileEnv)) {
+            try {
+              await prisma.projectEnvVar.upsert({ where: { projectId_key: { projectId, key: k } }, update: { value: v }, create: { projectId, key: k, value: v } })
+            } catch {
+              // ignore per-key persistence failures
+            }
+          }
+
+          // update portsToCheck for the next iteration
+          portsToCheck.length = 0
+          if (fileEnv.POSTGRES_PORT) portsToCheck.push(Number(fileEnv.POSTGRES_PORT))
+          if (fileEnv.STUDIO_PORT) portsToCheck.push(Number(fileEnv.STUDIO_PORT))
+          if (fileEnv.INBUCKET_WEB_PORT) portsToCheck.push(Number(fileEnv.INBUCKET_WEB_PORT))
+          if (fileEnv.ANALYTICS_PORT) portsToCheck.push(Number(fileEnv.ANALYTICS_PORT))
+          if (fileEnv.KONG_HTTP_PORT) portsToCheck.push(Number(fileEnv.KONG_HTTP_PORT))
+
+          // small backoff before re-checking
+          await new Promise(r => setTimeout(r, 250))
+        }
+
+    console.log('Starting Supabase stack via supabase CLI...')
     try {
+      // Provide a unique compose project name to avoid Docker stack/network collisions
+      const spawnEnvBase = { ...(process.env as Record<string,string>), COMPOSE_PROJECT_NAME: `supa_${project.slug}` }
+      const maxRetriesStart = 3
+      let attempt = 0
+      let started = false
+      while (attempt < maxRetriesStart && !started) {
+        try {
+          attempt += 1
+          await execAsync('supabase start', { cwd: projectRoot, timeout: 1000 * 60 * 10, maxBuffer: 1024 * 1024 * 10, env: spawnEnvBase as unknown as NodeJS.ProcessEnv })
+          started = true
+          break
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          if (msg.includes('port is already allocated') || msg.match(/Bind for .* failed: port is already allocated/)) {
+            // Try to select a new base port and rewrite envs/config
+            if (attempt >= maxRetriesStart) {
+              throw new Error(`Supabase start failed due to port allocation after ${attempt} attempts. ${msg}`)
+            }
+            // find new base
+            const initialBase = 8000 + (Date.now() % 10000)
+            const offsets = [0, 100, 1000, 1100, 1101, 2000]
+            const newBase = await findAvailableBasePort(initialBase, offsets, 200)
+            if (!newBase) {
+              // Can't find alternative; surface the docker containers owning the ports
+              try {
+                const { exec } = await import('child_process')
+                const { promisify } = await import('util')
+                const execAsyncLocal = promisify(exec)
+                const { stdout } = await execAsyncLocal('docker ps --format "{{.ID}} {{.Names}} {{.Ports}}"')
+                const lines = String(stdout || '').split(/\r?\n/).filter(Boolean)
+                // Try to list any lines that show 5432-ish ports as a best-effort
+                const matches = lines.filter(l => /:543\d{1,2}|:5432/.test(l))
+                throw new Error('Unable to find alternative base port. Ports in use: ' + JSON.stringify(matches))
+              } catch {
+                throw new Error('Unable to find alternative base port and docker ps failed')
+              }
+            }
+
+            // update fileEnv and write
+            fileEnv.POSTGRES_PORT = String(newBase + 2000)
+            fileEnv.KONG_HTTP_PORT = String(newBase)
+            fileEnv.ANALYTICS_PORT = String(newBase + 1000)
+            fileEnv.INBUCKET_WEB_PORT = String(newBase + 1100)
+            fileEnv.INBUCKET_SMTP_PORT = String(newBase + 1101)
+            fileEnv.STUDIO_PORT = String(newBase + 100)
+
+            const envLines = Object.entries(fileEnv).map(([k, v]) => `${k}=${v}`).join('\n')
+            try { await fs.writeFile(envPath, envLines, 'utf8') } catch {}
+            try { await fs.writeFile(path.join(projectDockerDir, '.env'), envLines, 'utf8') } catch {}
+            try { await updateSupabaseConfig(path.join(process.cwd(), 'supabase-projects', project.slug), fileEnv) } catch {}
+
+            for (const [k, v] of Object.entries(fileEnv)) {
+              try { await prisma.projectEnvVar.upsert({ where: { projectId_key: { projectId, key: k } }, update: { value: v }, create: { projectId, key: k, value: v } }) } catch {}
+            }
+
+            // small delay before retry
+            await new Promise(r => setTimeout(r, 300))
+            continue
+          }
+          throw err
+        }
+      }
+      if (!started) throw new Error('Supabase CLI failed to start the stack after retries')
+    } catch (startError) {
+      const msg = startError instanceof Error ? startError.message : String(startError)
+      throw new Error(`Supabase CLI failed to start the stack: ${msg}`)
+    }
+      } catch (startError) {
+        const msg = startError instanceof Error ? startError.message : String(startError)
+        throw new Error(`Supabase CLI failed to start the stack: ${msg}`)
+      }
+    
+  // Verify that containers are running and retrieve runtime status from the CLI
+  try {
+      // Docker compose files are written to the project's 'docker' subdirectory by the CLI
+        const projectDockerDir = path.join(projectRoot, 'docker')
       const { stdout } = await execAsync('docker compose ps --format json', { 
-        cwd: projectDir,
+        cwd: projectDockerDir,
         maxBuffer: 1024 * 1024 * 2 // 2MB buffer for container status
       })
       const containers = JSON.parse(`[${stdout.trim().split('\n').join(',')}]`)
       const runningContainers = containers.filter((c: { State: string }) => c.State === 'running')
-      console.log(`Deployment successful: ${runningContainers.length} containers running`)
+  console.log(`Deployment successful: ${runningContainers.length} containers running`)
+      
+      // Ensure Inbucket is running
+      const inbucketContainer = runningContainers.find((c: unknown) => {
+  const obj = c as Record<string, string | number>
+        return obj.Service === 'inbucket' || (typeof obj.Name === 'string' && obj.Name.includes('inbucket'))
+      })
+
+      if (!inbucketContainer) {
+        throw new Error('Inbucket service is not running after deployment. Check `docker compose logs inbucket` for details.')
+      }
+
+      // Verify GOTRUE_JWT_SECRET inside auth container matches the .env JWT_SECRET
+        const envFilePath = path.join(projectRoot, '.env')
+      let envText = ''
+      try {
+        envText = await fs.readFile(envFilePath, 'utf8')
+      } catch {
+        envText = ''
+      }
+
+      const parseEnv = (text: string) => {
+        const out: Record<string,string> = {}
+        text.split(/\r?\n/).forEach(line => {
+          const idx = line.indexOf('=')
+          if (idx > 0) {
+            const k = line.slice(0, idx)
+            const v = line.slice(idx+1)
+            out[k] = v
+          }
+        })
+        return out
+      }
+
+      const fileEnv = parseEnv(envText)
+      const expectedJwt = fileEnv['JWT_SECRET'] || ''
+
+      // Find auth container name
+      const authContainer = runningContainers.find((c: unknown) => {
+  const obj = c as Record<string, string | number>
+        return obj.Service === 'auth' || (typeof obj.Name === 'string' && obj.Name.includes('-auth'))
+      })
+
+      if (!authContainer) {
+        throw new Error('Auth (GoTrue) container not found after deployment')
+      }
+
+      // Determine container name to exec into
+      const containerName = authContainer.Name || authContainer.Names || authContainer.Container || authContainer.Name
+      try {
+          const { stdout: gotrueEnv } = await execAsync(`docker exec ${containerName} printenv GOTRUE_JWT_SECRET`, { cwd: projectDockerDir })
+        const containerJwt = gotrueEnv.trim()
+        if (expectedJwt && containerJwt && expectedJwt !== containerJwt) {
+          throw new Error('GOTRUE_JWT_SECRET inside container does not match project .env JWT_SECRET. This will cause invalid JWTs for admin operations.')
+        }
+      } catch (e) {
+        throw new Error(`Failed to verify GOTRUE_JWT_SECRET inside auth container: ${e instanceof Error ? e.message : String(e)}`)
+      }
     } catch {
       console.warn('Could not verify container status, but deployment may have succeeded')
     }
+      // Query supabase CLI for runtime status (preferred) and persist runtime URLs + JWT_SECRET
+      try {
+          const { stdout: statusOut } = await execAsync('supabase status -o json --workdir .', { cwd: projectRoot, timeout: 20000, maxBuffer: 1024 * 1024 * 2 })
+        try {
+          const statusJson = JSON.parse(statusOut)
+          // Persist a selection of runtime values into projectEnvVar rows
+          const toPersist: Record<string,string> = {}
+          if (statusJson.API_URL) toPersist.API_URL = String(statusJson.API_URL)
+          if (statusJson.STUDIO_URL) toPersist.STUDIO_URL = String(statusJson.STUDIO_URL)
+          if (statusJson.INBUCKET_URL) toPersist.INBUCKET_URL = String(statusJson.INBUCKET_URL)
+          if (statusJson.MAILPIT_URL) toPersist.MAILPIT_URL = String(statusJson.MAILPIT_URL)
+          if (statusJson.DB_URL) toPersist.DB_URL = String(statusJson.DB_URL)
+          if (statusJson.JWT_SECRET) toPersist.JWT_SECRET = String(statusJson.JWT_SECRET)
+          if (statusJson.PUBLISHABLE_KEY) toPersist.PUBLISHABLE_KEY = String(statusJson.PUBLISHABLE_KEY)
+
+          for (const [k, v] of Object.entries(toPersist)) {
+            try {
+              await prisma.projectEnvVar.upsert({ where: { projectId_key: { projectId, key: k } }, update: { value: v }, create: { projectId, key: k, value: v } })
+            } catch {
+              // ignore per-key persistence failures
+            }
+          }
+
+          // Return status object in the result so callers (API/UI) can show runtime URLs
+          await prisma.project.update({ where: { id: projectId }, data: { status: 'active' } })
+          return { success: true, status: statusJson }
+    } catch {
+          // Could not parse status output; still mark active and return success without status
+          await prisma.project.update({ where: { id: projectId }, data: { status: 'active' } })
+          return { success: true }
+        }
+    } catch {
+        // Status query failed — still mark project active but return a partial success with message
+        try { await prisma.project.update({ where: { id: projectId }, data: { status: 'active' } }) } catch {}
+        return { success: true, note: 'Could not query supabase CLI status after start' }
+      }
     
-    // Update project status
-    await prisma.project.update({
-      where: { id: projectId },
-      data: { status: 'active' },
-    })
-    
+    // Should not reach here; return generic success as fallback
+    await prisma.project.update({ where: { id: projectId }, data: { status: 'active' } })
     return { success: true }
   } catch (error) {
     console.error('Failed to deploy project:', error)
@@ -451,9 +796,15 @@ export async function pauseProject(projectId: string) {
     }
     
     const projectDir = path.join(process.cwd(), 'supabase-projects', project.slug, 'docker')
-    
-    // Stop Docker containers
-    await execAsync('docker compose stop', { cwd: projectDir })
+
+    // Prefer using Supabase CLI to stop the stack (cross-platform and aware of CLI-managed resources)
+    try {
+      await execAsync('supabase stop --workdir .', { cwd: path.join(process.cwd(), 'supabase-projects', project.slug), timeout: 120000 })
+    } catch (cliStopError) {
+      console.warn('supabase stop failed, falling back to docker compose stop:', cliStopError)
+      // Fallback to docker compose stop in the docker folder
+      await execAsync('docker compose stop', { cwd: projectDir })
+    }
     
     // Update project status
     await prisma.project.update({
@@ -483,15 +834,20 @@ export async function deleteProject(projectId: string) {
     
     // Step 1: Stop and remove Docker containers
     try {
-      console.log(`Stopping Docker containers for project ${project.slug}...`)
-      await execAsync('docker compose down --volumes --remove-orphans', { 
-        cwd: dockerDir,
-        timeout: 120000, // 2 minutes timeout
-        maxBuffer: 1024 * 1024 * 5 // 5MB buffer
-      })
-    } catch (dockerError) {
-      console.warn('Failed to stop Docker containers (they may not be running):', dockerError)
-      // Continue with deletion even if Docker cleanup fails
+      console.log(`Stopping Docker containers for project ${project.slug} via supabase CLI...`)
+      await execAsync('supabase stop --workdir .', { cwd: projectDir, timeout: 120000 })
+    } catch (cliStopError) {
+      console.warn('supabase stop failed, falling back to docker compose down:', cliStopError)
+      try {
+        await execAsync('docker compose down --volumes --remove-orphans', { 
+          cwd: dockerDir,
+          timeout: 120000, // 2 minutes timeout
+          maxBuffer: 1024 * 1024 * 5 // 5MB buffer
+        })
+      } catch (dockerError) {
+        console.warn('Failed to stop Docker containers (they may not be running):', dockerError)
+        // Continue with deletion even if Docker cleanup fails
+      }
     }
     
     // Step 2: Remove project directory

@@ -24,9 +24,11 @@ export default function DashboardPage() {
   const [error, setError] = useState('')
   const [selectedProject, setSelectedProject] = useState<Project | null>(null)
   const [projectUrls, setProjectUrls] = useState<Record<string, string>>({})
+  
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const router = useRouter()
+  const [cliAvailable, setCliAvailable] = useState<boolean | null>(null)
 
   const fetchProjects = async () => {
     try {
@@ -96,29 +98,58 @@ export default function DashboardPage() {
   const handleManageProject = async (project: Project) => {
     setSelectedProject(project)
     
-    // Fetch project URLs from environment variables
+    // Fetch runtime status from the Supabase CLI first, fall back to env vars
     try {
-      const response = await fetch(`/api/projects/${project.id}/env`)
-      if (response.ok) {
-        const data = await response.json()
-        const envVars = data.envVars || {}
-        
-        // Extract URLs from environment variables
+      const statusResp = await fetch(`/api/projects/${project.id}/status`)
+      if (statusResp.ok) {
+        const statusData = await statusResp.json()
+        const status = statusData.status || {}
         const urls: Record<string, string> = {}
-        if (envVars.KONG_HTTP_PORT) {
-          urls['API Gateway'] = `http://localhost:${envVars.KONG_HTTP_PORT}`
+        if (status['API_URL']) urls['API Gateway'] = String(status['API_URL'])
+        if (status['STUDIO_URL']) urls['Supabase Studio'] = String(status['STUDIO_URL'])
+        // Analytics / Mail UI
+        if (status['INBUCKET_URL']) urls['Inbucket (Mail UI)'] = String(status['INBUCKET_URL'])
+        if (status['MAILPIT_URL']) urls['Inbucket (Mail UI)'] = String(status['MAILPIT_URL'])
+        if (status['MAILPIT_URL'] && !urls['Inbucket (Mail UI)']) urls['Inbucket (Mail UI)'] = String(status['MAILPIT_URL'])
+        if (status['STORAGE_S3_URL']) urls['Storage (S3)'] = String(status['STORAGE_S3_URL'])
+        if (status['PUBLISHABLE_KEY']) urls['Publishable Key'] = String(status['PUBLISHABLE_KEY'])
+        // Database: construct from DB_URL if available
+        if (status['DB_URL']) urls['Database'] = String(status['DB_URL'])
+
+        // If we have any runtime URLs, prefer them
+        if (Object.keys(urls).length > 0) {
+          setProjectUrls(urls)
+        } else {
+          // Fallback to env vars
+          const response = await fetch(`/api/projects/${project.id}/env`)
+          if (response.ok) {
+            const data = await response.json()
+            const envVars = data.envVars || {}
+            const fallback: Record<string, string> = {}
+            if (envVars.KONG_HTTP_PORT) fallback['API Gateway'] = `http://localhost:${envVars.KONG_HTTP_PORT}`
+            if (envVars.KONG_HTTP_PORT) fallback['Supabase Studio'] = `http://localhost:${envVars.KONG_HTTP_PORT}`
+            else if (envVars.STUDIO_PORT) fallback['Supabase Studio'] = `http://localhost:${envVars.STUDIO_PORT}`
+            if (envVars.ANALYTICS_PORT) fallback['Analytics (Logflare)'] = `http://localhost:${envVars.ANALYTICS_PORT}`
+            if (envVars.INBUCKET_WEB_PORT) fallback['Inbucket (Mail UI)'] = `http://localhost:${envVars.INBUCKET_WEB_PORT}`
+            if (envVars.POSTGRES_PORT) fallback['Database'] = `postgresql://postgres:${envVars.POSTGRES_PASSWORD || 'password'}@localhost:${envVars.POSTGRES_PORT}/postgres`
+            setProjectUrls(fallback)
+          }
         }
-        if (envVars.STUDIO_PORT) {
-          urls['Supabase Studio'] = `http://localhost:${envVars.KONG_HTTP_PORT || 8000}`
+      } else {
+        // If status call failed, fallback to env vars as before
+        const response = await fetch(`/api/projects/${project.id}/env`)
+        if (response.ok) {
+          const data = await response.json()
+          const envVars = data.envVars || {}
+          const urls: Record<string, string> = {}
+          if (envVars.KONG_HTTP_PORT) urls['API Gateway'] = `http://localhost:${envVars.KONG_HTTP_PORT}`
+          if (envVars.KONG_HTTP_PORT) urls['Supabase Studio'] = `http://localhost:${envVars.KONG_HTTP_PORT}`
+          else if (envVars.STUDIO_PORT) urls['Supabase Studio'] = `http://localhost:${envVars.STUDIO_PORT || 3000}`
+          if (envVars.ANALYTICS_PORT) urls['Analytics (Logflare)'] = `http://localhost:${envVars.ANALYTICS_PORT}`
+          if (envVars.INBUCKET_WEB_PORT) urls['Inbucket (Mail UI)'] = `http://localhost:${envVars.INBUCKET_WEB_PORT}`
+          if (envVars.POSTGRES_PORT) urls['Database'] = `postgresql://postgres:${envVars.POSTGRES_PASSWORD || 'password'}@localhost:${envVars.POSTGRES_PORT}/postgres`
+          setProjectUrls(urls)
         }
-        if (envVars.ANALYTICS_PORT) {
-          urls['Analytics (Logflare)'] = `http://localhost:${envVars.ANALYTICS_PORT}`
-        }
-        if (envVars.POSTGRES_PORT) {
-          urls['Database'] = `postgresql://postgres:${envVars.POSTGRES_PASSWORD || 'password'}@localhost:${envVars.POSTGRES_PORT}/postgres`
-        }
-        
-        setProjectUrls(urls)
       }
     } catch (error) {
       console.error('Failed to fetch project URLs:', error)
@@ -162,6 +193,39 @@ export default function DashboardPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => {
+    const check = async () => {
+      try {
+        const r = await fetch('/api/cli/check')
+        if (r.ok) {
+          const d = await r.json()
+          if (d.available) {
+            setCliAvailable(true)
+            return
+          }
+          // If first attempt failed, retry once after a short delay to avoid transient failures
+          await new Promise(res => setTimeout(res, 1500))
+          try {
+            const r2 = await fetch('/api/cli/check')
+            if (r2.ok) {
+              const d2 = await r2.json()
+              setCliAvailable(!!d2.available)
+              return
+            }
+          } catch {
+            // fallthrough to mark unavailable
+          }
+          setCliAvailable(false)
+        } else {
+          setCliAvailable(false)
+        }
+      } catch {
+        setCliAvailable(false)
+      }
+    }
+    check()
+  }, [])
+
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
@@ -193,6 +257,25 @@ export default function DashboardPage() {
       </header>
 
       <main className="container mx-auto px-4 py-8">
+        {cliAvailable === false && (
+          <div className="mb-6 p-4 rounded bg-yellow-50 border border-yellow-200 text-yellow-800">
+            <div className="flex items-center justify-between">
+              <div>
+                <strong>Supabase CLI not found.</strong>
+                <div className="text-sm">Installing the Supabase CLI is recommended for robust local project orchestration.</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  className="px-3 py-1 bg-white border rounded text-sm"
+                  onClick={() => navigator.clipboard.writeText('npm install -g supabase')}
+                >
+                  Copy install command
+                </button>
+                <a className="text-sm text-blue-600" href="https://supabase.com/docs/guides/cli" target="_blank" rel="noreferrer">Docs</a>
+              </div>
+            </div>
+          </div>
+        )}
         {!initialized && projects.length === 0 ? (
           <div className="flex flex-col items-center justify-center min-h-[400px] text-center">
             <Card className="w-full max-w-md">
@@ -333,18 +416,22 @@ export default function DashboardPage() {
                   {Object.entries(projectUrls).map(([name, url]) => (
                     <div key={name} className="flex items-center justify-between p-2 bg-gray-50 dark:bg-gray-800 rounded">
                       <span className="text-sm text-gray-600 dark:text-gray-400">{name}:</span>
-                      <a
-                        href={url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 font-mono truncate max-w-xs"
-                        title={url}
-                      >
-                        {url}
-                        <svg className="w-3 h-3 inline ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                        </svg>
-                      </a>
+                      <div className="flex items-center gap-2">
+                        <a
+                          href={url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sm text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-300 font-mono truncate max-w-xs"
+                          title={url}
+                        >
+                          {url}
+                          <svg className="w-3 h-3 inline ml-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                        </a>
+
+                        {/* Copy password removed — deprecated UI element */}
+                      </div>
                     </div>
                   ))}
                   {Object.keys(projectUrls).length === 0 && (
@@ -365,6 +452,8 @@ export default function DashboardPage() {
                   </svg>
                   Configure
                 </Button>
+                {/* Open Studio (Auto-login) button removed — feature deprecated */}
+
                 <Button
                   variant="destructive"
                   onClick={() => setShowDeleteConfirm(true)}

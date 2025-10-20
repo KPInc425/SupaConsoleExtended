@@ -28,16 +28,18 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       )
     }
 
-    const result = await deployProject(id)
+  const result: { success: boolean; status?: unknown; note?: string; error?: string } = await deployProject(id)
 
     if (!result.success) {
-      return NextResponse.json(
-        { error: result.error },
-        { status: 500 }
-      )
+      return NextResponse.json({ error: result.error }, { status: 500 })
     }
 
-    return NextResponse.json({ success: true })
+    // If deployProject returned runtime status, include it so the UI can show URLs
+  const payload: Record<string, unknown> = { success: true }
+  if (result.status) payload.status = result.status
+  if (result.note) payload.note = result.note
+
+    return NextResponse.json(payload)
   } catch (error) {
     console.error('Deploy project error:', error)
     return NextResponse.json(

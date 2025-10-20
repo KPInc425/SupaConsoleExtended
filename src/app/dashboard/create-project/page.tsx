@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import Image from 'next/image'
@@ -14,6 +14,9 @@ export default function CreateProjectPage() {
   const [description, setDescription] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [logs, setLogs] = useState<string[]>([])
+  const [showLogs, setShowLogs] = useState(false)
+  const logsEndRef = useRef<HTMLDivElement>(null)
   const router = useRouter()
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -26,10 +29,16 @@ export default function CreateProjectPage() {
     setDescription(e.target.value)
   }
 
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [logs])
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
     setError('')
+    setLogs([])
+    setShowLogs(false)
 
     if (!name.trim()) {
       setError('Project name is required')
@@ -38,24 +47,29 @@ export default function CreateProjectPage() {
     }
 
     try {
-      const response = await fetch('/api/projects', {
+      // Create the project first
+      const createResponse = await fetch('/api/projects', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: name.trim(), description: description.trim() }),
       })
 
-      if (response.ok) {
-        const data = await response.json()
-        // Redirect to project configuration page
-        router.push(`/dashboard/projects/${data.project.id}/configure`)
-      } else {
-        const data = await response.json()
+      if (!createResponse.ok) {
+        const data = await createResponse.json()
         setError(data.error || 'Failed to create project')
+        setLoading(false)
+        return
       }
-    } catch {
-      setError('An error occurred. Please try again.')
+
+      const projectData = await createResponse.json()
+      const createdProjectId = projectData.project.id
+      // Project created; do NOT start the Supabase CLI here.
+      // Redirect the user to the configuration page so they can review/save settings
+      // and click Deploy when ready.
+      router.push(`/dashboard/projects/${createdProjectId}/configure`)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'An error occurred. Please try again.')
+      setLogs(prev => [...prev, `Error: ${err instanceof Error ? err.message : String(err)}`])
     } finally {
       setLoading(false)
     }
@@ -104,49 +118,84 @@ export default function CreateProjectPage() {
                   </div>
                 )}
 
-                <div className="space-y-2">
-                  <Label htmlFor="name">Project Name *</Label>
-                  <Input
-                    id="name"
-                    type="text"
-                    placeholder="Enter project name"
-                    value={name}
-                    onChange={handleNameChange}
-                    required
-                  />
-                  <p className="text-sm text-muted-foreground">
-                    A unique identifier will be generated automatically
-                  </p>
-                </div>
+                {!showLogs ? (
+                  <>
+                    <div className="space-y-2">
+                      <Label htmlFor="name">Project Name *</Label>
+                      <Input
+                        id="name"
+                        type="text"
+                        placeholder="Enter project name"
+                        value={name}
+                        onChange={handleNameChange}
+                        required
+                        disabled={loading}
+                      />
+                      <p className="text-sm text-muted-foreground">
+                        A unique identifier will be generated automatically
+                      </p>
+                    </div>
 
-                <div className="space-y-2">
-                  <Label htmlFor="description">Description (optional)</Label>
-                  <Input
-                    id="description"
-                    type="text"
-                    placeholder="Brief description of your project"
-                    value={description}
-                    onChange={handleDescriptionChange}
-                  />
-                </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="description">Description (optional)</Label>
+                      <Input
+                        id="description"
+                        type="text"
+                        placeholder="Brief description of your project"
+                        value={description}
+                        onChange={handleDescriptionChange}
+                        disabled={loading}
+                      />
+                    </div>
 
-                <div className="bg-blue-500/10 border border-blue-500/20 text-blue-500 px-4 py-3 rounded">
-                  <p className="text-sm">
-                    <strong>Next steps:</strong> After creation, you&apos;ll configure environment variables 
-                    and the system will automatically set up Docker containers for your project.
-                  </p>
-                </div>
+                        <div className="bg-blue-500/10 border border-blue-500/20 text-blue-500 px-4 py-3 rounded">
+                          <p className="text-sm">
+                            <strong>Note:</strong> The Supabase CLI is used to run local Supabase instances. After creating the project you must save any configuration changes on the next page and then click <em>Deploy</em> to start the stack.
+                          </p>
+                        </div>
 
-                <div className="flex gap-4">
-                  <Button type="submit" disabled={loading}>
-                    {loading ? 'Creating Project...' : 'Create Project'}
-                  </Button>
-                  <Link href="/dashboard">
-                    <Button type="button" variant="outline">
-                      Cancel
-                    </Button>
-                  </Link>
-                </div>
+                    <div className="flex gap-4">
+                      <Button type="submit" disabled={loading}>
+                        {loading ? 'Creating Project...' : 'Create Project'}
+                      </Button>
+                      <Link href="/dashboard">
+                        <Button type="button" variant="outline" disabled={loading}>
+                          Cancel
+                        </Button>
+                      </Link>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="space-y-2">
+                      <Label>Creation Progress</Label>
+                      <div className="bg-gray-900 text-green-400 p-4 rounded font-mono text-sm max-h-96 overflow-y-auto border border-gray-700">
+                        {logs.length === 0 ? (
+                          <div className="text-gray-400">Initializing project creation...</div>
+                        ) : (
+                          logs.map((log, i) => (
+                            <div key={i} className="whitespace-pre-wrap break-words">
+                              {log}
+                            </div>
+                          ))
+                        )}
+                        <div ref={logsEndRef} />
+                      </div>
+                    </div>
+
+                    {!loading && (
+                      <div className="flex gap-4">
+                        <Button
+                          type="button"
+                          onClick={() => router.push('/dashboard')}
+                          className="flex-1"
+                        >
+                          Back to Dashboard
+                        </Button>
+                      </div>
+                    )}
+                  </>
+                )}
               </form>
             </CardContent>
           </Card>
