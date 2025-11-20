@@ -3,7 +3,7 @@ import { spawn } from 'child_process'
 import * as path from 'path'
 import { validateSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
-import { isPortAvailable, findAvailableBasePort, updateSupabaseConfig } from '@/lib/project'
+import { isPortAvailable, findAvailableBasePort } from '@/lib/project'
 import * as fs from 'fs/promises'
 // no exec required here; using spawn for streaming
 
@@ -72,7 +72,7 @@ export async function POST(request: NextRequest) {
 
         if (occupied.length > 0) {
           const initialBase = 8000 + (Date.now() % 10000)
-          const offsets = [0, 100, 1000, 1100, 1101, 2000]
+          const offsets = [0, 100, 1000, 1100, 1101, 1102, 2000]
           const newBase = await findAvailableBasePort(initialBase, offsets, 200)
           if (!newBase) {
             // Try to identify which containers are publishing the conflicting ports to give the user actionable advice
@@ -107,7 +107,8 @@ export async function POST(request: NextRequest) {
           const envLines = Object.entries(fileEnv).map(([k,v]) => `${k}=${v}`).join('\n')
           try { await fs.writeFile(envPath, envLines, 'utf8') } catch {}
           try { await fs.writeFile(path.join(projectDir, 'docker', '.env'), envLines, 'utf8') } catch {}
-          try { await updateSupabaseConfig(projectDir, fileEnv) } catch { /* ignore */ }
+          // Do NOT modify supabase/config.toml here. Keep the template intact and
+          // rely on env(...) placeholders and the project's .env for runtime values.
 
           // persist to DB
           for (const [k, v] of Object.entries(fileEnv)) {
@@ -207,8 +208,7 @@ export async function POST(request: NextRequest) {
                 const cfgPath = path.join(projectDir, 'supabase', 'config.toml')
                 try {
                   await fs.access(cfgPath)
-                  await updateSupabaseConfig(projectDir, fileEnv)
-                  sendEvent('log', `Updated config.toml: ${cfgPath}`)
+                  sendEvent('log', `Preserving existing config.toml (not modifying): ${cfgPath}`)
                 } catch {
                   sendEvent('log', `No config.toml present at ${cfgPath}; skipping TOML update`) 
                 }

@@ -50,8 +50,9 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
     // PostgREST
     PGRST_DB_SCHEMAS: 'public,storage,graphql_public',
     
-    // Auth
-    SITE_URL: 'http://localhost:3000',
+  // Auth
+  // Default SITE_URL points to local frontend dev server (Vite) on 5173 so magic links open the expected app.
+  SITE_URL: 'http://localhost:5173',
     ADDITIONAL_REDIRECT_URLS: '',
     JWT_EXPIRY: '3600',
     DISABLE_SIGNUP: 'false',
@@ -78,11 +79,12 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
     ENABLE_PHONE_SIGNUP: 'true',
     ENABLE_PHONE_AUTOCONFIRM: 'true',
     
-    // Studio
-    STUDIO_DEFAULT_ORGANIZATION: 'Default Organization',
-    STUDIO_DEFAULT_PROJECT: 'Default Project',
-    STUDIO_PORT: '3000',
-    SUPABASE_PUBLIC_URL: 'http://localhost:8000',
+  // Studio
+  STUDIO_DEFAULT_ORGANIZATION: 'Default Organization',
+  STUDIO_DEFAULT_PROJECT: 'Default Project',
+  STUDIO_PORT: '3000',
+  // Supabase public URL used by some templates; keep API host distinct, but default front-end URLs point to 5173 for dev.
+  SUPABASE_PUBLIC_URL: 'http://localhost:5173',
     
     // ImgProxy
     IMGPROXY_ENABLE_WEBP_DETECTION: 'true',
@@ -108,6 +110,8 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
   const [error, setError] = useState('')
   const [success, setSuccess] = useState('')
   const [projectId, setProjectId] = useState<string>('')
+  const [runtimeStatus, setRuntimeStatus] = useState<Record<string, string> | null>(null)
+  const [statusLoading, setStatusLoading] = useState(false)
   const [systemChecks, setSystemChecks] = useState<{
     docker: boolean;
     dockerCompose: boolean;
@@ -145,7 +149,44 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
     }
 
     loadEnvVars()
+    // also fetch runtime status when opening the configure page
+    ;(async () => {
+      setStatusLoading(true)
+      try {
+        const resp = await fetch(`/api/projects/${projectId}/status`)
+        if (resp.ok) {
+          const data = await resp.json()
+          if (data.status) setRuntimeStatus(data.status as Record<string,string>)
+        }
+      } finally {
+        setStatusLoading(false)
+      }
+    })()
   }, [projectId])
+
+
+
+  const fetchRuntimeStatus = async () => {
+    if (!projectId) return
+    setStatusLoading(true)
+    setError('')
+    try {
+      const resp = await fetch(`/api/projects/${projectId}/status`)
+      if (!resp.ok) {
+        setRuntimeStatus(null)
+        return
+      }
+      const data = await resp.json()
+      if (data.status) setRuntimeStatus(data.status as Record<string,string>)
+      else setRuntimeStatus(null)
+    } catch {
+      setRuntimeStatus(null)
+    } finally {
+      setStatusLoading(false)
+    }
+  }
+
+
 
   const generateSecureKey = (length: number = 32) => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
@@ -251,9 +292,18 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
           const status = data.status as Record<string, string>
           const lines: string[] = []
           if (status.API_URL) lines.push(`API: ${status.API_URL}`)
+          if (status.GRAPHQL_URL) lines.push(`GraphQL: ${status.GRAPHQL_URL}`)
+          if (status.STORAGE_URL) lines.push(`Storage: ${status.STORAGE_URL}`)
+          if (status.STORAGE_S3_URL) lines.push(`S3 Storage: ${status.STORAGE_S3_URL}`)
+          if (status.MCP_URL) lines.push(`MCP: ${status.MCP_URL}`)
           if (status.STUDIO_URL) lines.push(`Studio: ${status.STUDIO_URL}`)
-          if (status.INBUCKET_URL) lines.push(`Mail UI: ${status.INBUCKET_URL}`)
-          if (status.MAILPIT_URL) lines.push(`Mail UI: ${status.MAILPIT_URL}`)
+          if (status.INBUCKET_URL) lines.push(`Inbucket (Mail UI): ${status.INBUCKET_URL}`)
+          if (status.MAILPIT_URL) lines.push(`Mail UI (Mailpit): ${status.MAILPIT_URL}`)
+          if (status.PUBLISHABLE_KEY) lines.push(`Publishable key: ${status.PUBLISHABLE_KEY}`)
+          if (status.SECRET_KEY) lines.push(`Secret key: ${status.SECRET_KEY}`)
+          if (status.S3_ACCESS_KEY) lines.push(`S3 access key: ${status.S3_ACCESS_KEY}`)
+          if (status.S3_SECRET_KEY) lines.push(`S3 secret key: ${status.S3_SECRET_KEY}`)
+          if (status.S3_REGION) lines.push(`S3 region: ${status.S3_REGION}`)
           if (status.DB_URL) lines.push(`DB: ${status.DB_URL}`)
           setSuccess(`Project deployed successfully!\n${lines.join('\n')}`)
         } else if (data.note) {
@@ -345,9 +395,18 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
                 const stJson = await st.json()
                 const lines: string[] = []
                 if (stJson.API_URL) lines.push(`API: ${stJson.API_URL}`)
+                if (stJson.GRAPHQL_URL) lines.push(`GraphQL: ${stJson.GRAPHQL_URL}`)
+                if (stJson.STORAGE_URL) lines.push(`Storage: ${stJson.STORAGE_URL}`)
+                if (stJson.STORAGE_S3_URL) lines.push(`S3 Storage: ${stJson.STORAGE_S3_URL}`)
+                if (stJson.MCP_URL) lines.push(`MCP: ${stJson.MCP_URL}`)
                 if (stJson.STUDIO_URL) lines.push(`Studio: ${stJson.STUDIO_URL}`)
-                if (stJson.INBUCKET_URL) lines.push(`Mail UI: ${stJson.INBUCKET_URL}`)
-                if (stJson.MAILPIT_URL) lines.push(`Mail UI: ${stJson.MAILPIT_URL}`)
+                if (stJson.INBUCKET_URL) lines.push(`Inbucket (Mail UI): ${stJson.INBUCKET_URL}`)
+                if (stJson.MAILPIT_URL) lines.push(`Mail UI (Mailpit): ${stJson.MAILPIT_URL}`)
+                if (stJson.PUBLISHABLE_KEY) lines.push(`Publishable key: ${stJson.PUBLISHABLE_KEY}`)
+                if (stJson.SECRET_KEY) lines.push(`Secret key: ${stJson.SECRET_KEY}`)
+                if (stJson.S3_ACCESS_KEY) lines.push(`S3 access key: ${stJson.S3_ACCESS_KEY}`)
+                if (stJson.S3_SECRET_KEY) lines.push(`S3 secret key: ${stJson.S3_SECRET_KEY}`)
+                if (stJson.S3_REGION) lines.push(`S3 region: ${stJson.S3_REGION}`)
                 if (stJson.DB_URL) lines.push(`DB: ${stJson.DB_URL}`)
                 setSuccess(`Project deployed successfully!\n${lines.join('\n')}`)
               } else {
@@ -416,6 +475,87 @@ export default function ConfigureProjectPage({ params }: ConfigureProjectPagePro
           </div>
 
           <div className="space-y-6">
+            {/* Runtime Info (live) */}
+            <Card>
+              <CardHeader>
+                <CardTitle>⚙️ Runtime Info</CardTitle>
+                <CardDescription>Live runtime URLs and keys reported by the Supabase CLI</CardDescription>
+                <div className="ml-auto">
+                  <Button size="sm" variant="outline" onClick={fetchRuntimeStatus}>
+                    {statusLoading ? 'Refreshing...' : 'Refresh'}
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                {runtimeStatus ? (
+                  <div className="space-y-2">
+                    {runtimeStatus.API_URL && (
+                      <div className="flex items-center gap-2">API: <code className="font-mono">{runtimeStatus.API_URL}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.API_URL)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.GRAPHQL_URL && (
+                      <div className="flex items-center gap-2">GraphQL: <code className="font-mono">{runtimeStatus.GRAPHQL_URL}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.GRAPHQL_URL)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.STUDIO_URL && (
+                      <div className="flex items-center gap-2">Studio: <a href={runtimeStatus.STUDIO_URL} target="_blank" className="font-mono">{runtimeStatus.STUDIO_URL}</a>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.STUDIO_URL)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.STORAGE_URL && (
+                      <div className="flex items-center gap-2">Storage: <code className="font-mono">{runtimeStatus.STORAGE_URL}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.STORAGE_URL)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.STORAGE_S3_URL && (
+                      <div className="flex items-center gap-2">S3: <code className="font-mono">{runtimeStatus.STORAGE_S3_URL}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.STORAGE_S3_URL)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.INBUCKET_URL && (
+                      <div className="flex items-center gap-2">Inbucket (Mail UI): <a href={runtimeStatus.INBUCKET_URL} target="_blank" className="font-mono">{runtimeStatus.INBUCKET_URL}</a>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.INBUCKET_URL)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.MAILPIT_URL && (
+                      <div className="flex items-center gap-2">Mailpit UI: <a href={runtimeStatus.MAILPIT_URL} target="_blank" className="font-mono">{runtimeStatus.MAILPIT_URL}</a>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.MAILPIT_URL)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.DB_URL && (
+                      <div className="flex items-center gap-2">DB URL: <code className="font-mono break-all">{runtimeStatus.DB_URL}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.DB_URL)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.PUBLISHABLE_KEY && (
+                      <div className="flex items-center gap-2">Publishable key: <code className="font-mono">{runtimeStatus.PUBLISHABLE_KEY}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.PUBLISHABLE_KEY)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.SECRET_KEY && (
+                      <div className="flex items-center gap-2">Secret key: <code className="font-mono">{runtimeStatus.SECRET_KEY}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.SECRET_KEY)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.S3_ACCESS_KEY && (
+                      <div className="flex items-center gap-2">S3 access key: <code className="font-mono">{runtimeStatus.S3_ACCESS_KEY}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.S3_ACCESS_KEY)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.S3_SECRET_KEY && (
+                      <div className="flex items-center gap-2">S3 secret key: <code className="font-mono">{runtimeStatus.S3_SECRET_KEY}</code>
+                        <button onClick={async () => await navigator.clipboard.writeText(runtimeStatus.S3_SECRET_KEY)} className="ml-2 text-sm text-gray-500 hover:text-gray-700">Copy</button>
+                      </div>
+                    )}
+                    {runtimeStatus.S3_REGION && <div>S3 region: <code className="font-mono">{runtimeStatus.S3_REGION}</code></div>}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-500">No live runtime status available. Start the stack or press Refresh.</p>
+                )}
+              </CardContent>
+            </Card>
             {/* Secrets Section */}
             <Card>
               <CardHeader>

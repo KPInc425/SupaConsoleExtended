@@ -19,23 +19,67 @@ export async function updateSupabaseConfig(projectRoot: string, env: Record<stri
     } catch {
       // If the config doesn't exist, create a minimal one so the CLI will honor port overrides
       // Use canonical 'port' fields (not http_port/web_port) to match the CLI's expected keys.
-  const minimal: Record<string, unknown> = {
+    const minimal: Record<string, unknown> = {
         db: { port: env.POSTGRES_PORT ? Number(env.POSTGRES_PORT) : 5432 },
         kong: { port: env.KONG_HTTP_PORT ? Number(env.KONG_HTTP_PORT) : 54321 },
         studio: { port: env.STUDIO_PORT ? Number(env.STUDIO_PORT) : 54323 },
-        inbucket: { port: env.INBUCKET_WEB_PORT ? Number(env.INBUCKET_WEB_PORT) : 54324, smtp_port: env.INBUCKET_SMTP_PORT ? Number(env.INBUCKET_SMTP_PORT) : 1025 },
+        inbucket: { port: env.INBUCKET_WEB_PORT ? Number(env.INBUCKET_WEB_PORT) : 54324, smtp_port: env.INBUCKET_SMTP_PORT ? Number(env.INBUCKET_SMTP_PORT) : 1025, pop3_port: env.INBUCKET_POP3_PORT ? Number(env.INBUCKET_POP3_PORT) : 54326 },
         analytics: { port: env.ANALYTICS_PORT ? Number(env.ANALYTICS_PORT) : 54325 }
       }
       txt = TOML.stringify(minimal)
       try { await fs.mkdir(path.join(projectRoot, 'supabase'), { recursive: true }) } catch {}
       await fs.writeFile(cfgPath, txt, 'utf8')
     }
-    // Parse TOML safely
-  let parsed: Record<string, unknown> | undefined
+  // Before parsing, handle the case where the config uses unquoted env(NAME) tokens
+    // (the Supabase CLI accepts env(NAME) without quotes for numeric fields), which
+    // our TOML parser cannot parse. For numeric envs we control (ports), do a
+    // safe, targeted text replacement: replace occurrences like
+    //   pop3_port = env(INBUCKET_POP3_PORT)
+    // or
+    //   pop3_port = "env(INBUCKET_POP3_PORT)"
+    // with the numeric value from env if available. This avoids leaving a
+    // non-numeric token in the TOML which the CLI would later attempt to parse
+    // as a number and fail.
+    // Mapping used to find common keys in the config TOML
+    const mapping: Record<string, string[][]> = {
+      POSTGRES_PORT: [['db', 'port'], ['postgres', 'port'], ['database', 'port'], ['postgrest', 'port']],
+      KONG_HTTP_PORT: [['api', 'port'], ['kong', 'port'], ['gateway', 'port']],
+      STUDIO_PORT: [['studio', 'port']],
+      INBUCKET_WEB_PORT: [['inbucket', 'port']],
+      INBUCKET_SMTP_PORT: [['inbucket', 'smtp_port']],
+      INBUCKET_POP3_PORT: [['inbucket', 'pop3_port']],
+      ANALYTICS_PORT: [['analytics', 'port']],
+    }
+
+    const numericEnvKeys = Object.keys(mapping)
+    let txtProcessed = txt
+    for (const envKey of numericEnvKeys) {
+      const val = env[envKey]
+      if (!val) continue
+      const num = Number(val)
+      if (Number.isNaN(num)) continue
+
+      // Heuristics: replace common suffixes used in config keys (port, smtp_port, pop3_port)
+      // Build a regex to match lines like: key = env(NAME) or key = "env(NAME)"
+      // We only replace the specific env name so we don't accidentally replace other env(...) uses.
+      const name = envKey
+      // Possible toml key names to look for are taken from mapping paths
+      const paths = mapping[name as keyof typeof mapping]
+      for (const pathParts of paths) {
+        const keyName = pathParts[pathParts.length - 1]
+        const re = new RegExp(`(^\\s*${keyName}\\s*=\\s*)(?:\\"?env\\(${name}\\)\\"?|env\\(${name}\\))`, 'gmi')
+        txtProcessed = txtProcessed.replace(re, (_, p1) => `${p1}${num}`)
+      }
+    }
+
+    // Parse TOML safely after preprocessing replacements. If parsing fails, bail
+    // to avoid corrupting the file (we prefer to leave the file as-is instead
+    // of writing invalid content).
+    let parsed: Record<string, unknown> | undefined
     try {
-      parsed = TOML.parse(txt) as Record<string, unknown>
+      parsed = TOML.parse(txtProcessed) as Record<string, unknown>
     } catch {
-      // If parsing fails, fall back to no-op to avoid corrupting the file
+      // If parsing fails even after preprocessing, don't attempt to modify the file.
       return
     }
 
@@ -61,7 +105,17 @@ export async function updateSupabaseConfig(projectRoot: string, env: Record<stri
           const n = node as Record<string, unknown>
           const existing = n[last]
           if (typeof existing === 'string' && /^env\(.+\)$/.test(existing)) {
-            // preserve existing env(...) placeholder
+            // If the existing value is an env(...) placeholder, prefer to replace it
+            // with a numeric value when we actually have a numeric env value. This
+            // ensures numeric fields (ports) are written as numbers instead of
+            // leaving the literal env(...) string which the CLI may try to parse
+            // as a number and fail.
+            const asNum = Number(value)
+            if (!Number.isNaN(asNum)) {
+              n[last] = asNum as unknown
+            } else {
+              // Non-numeric env - preserve the env(...) placeholder string
+            }
           } else {
             n[last] = Number(value) as unknown
           }
@@ -70,16 +124,10 @@ export async function updateSupabaseConfig(projectRoot: string, env: Record<stri
     }
 
     // Update common DB/API/studio/mailpit port fields if POSTGRES_PORT or other envs set
-    const mapping: Record<string, string[][]> = {
-      POSTGRES_PORT: [['db', 'port'], ['postgres', 'port'], ['database', 'port'], ['postgrest', 'port']],
-      KONG_HTTP_PORT: [['api', 'port'], ['kong', 'port'], ['gateway', 'port']],
-      STUDIO_PORT: [['studio', 'port']],
-      INBUCKET_WEB_PORT: [['inbucket', 'port']],
-      INBUCKET_SMTP_PORT: [['inbucket', 'smtp_port']],
-      ANALYTICS_PORT: [['analytics', 'port']],
-    }
-
-    for (const [envKey, paths] of Object.entries(mapping)) {
+    // Reuse the `mapping` declared earlier (used for preprocessing) so we don't
+    // duplicate declarations and cause linter/TS errors.
+    for (const envKey of Object.keys(mapping)) {
+      const paths = mapping[envKey as keyof typeof mapping]
       if (env[envKey]) setIfPresent(paths, env[envKey])
     }
 
@@ -101,9 +149,9 @@ export async function updateSupabaseConfig(projectRoot: string, env: Record<stri
 
     heuristics(parsed)
 
-    // Stringify back to TOML and write
-    const out = TOML.stringify(parsed)
-    await fs.writeFile(cfgPath, out, 'utf8')
+  // Stringify back to TOML and write
+  const out = TOML.stringify(parsed)
+  await fs.writeFile(cfgPath, out, 'utf8')
   } catch {
     // ignore if file doesn't exist or IO fails
   }
@@ -306,7 +354,7 @@ export async function createProject(name: string, userId: string, description?: 
     // Generate envs and write .env (both project root and docker for compatibility)
     // Choose a basePort and ensure required service ports are free to avoid collisions
     const initialBase = 8000 + (timestamp % 10000)
-    const requiredOffsets = [0, 100, 1000, 1100, 1101, 2000]
+  const requiredOffsets = [0, 100, 1000, 1100, 1101, 1102, 2000]
     const foundBase = await findAvailableBasePort(initialBase, requiredOffsets, 200)
     if (!foundBase) {
       throw new Error('Failed to find an available base port for the new project. Please free local ports or try again.')
@@ -325,17 +373,20 @@ export async function createProject(name: string, userId: string, description?: 
       KONG_HTTP_PORT: basePort.toString(),
       ANALYTICS_PORT: (basePort + 1000).toString(),
       INBUCKET_WEB_PORT: (basePort + 1100).toString(),
-      INBUCKET_SMTP_PORT: (basePort + 1101).toString(),
+  INBUCKET_SMTP_PORT: (basePort + 1101).toString(),
+  INBUCKET_POP3_PORT: (basePort + 1102).toString(),
       POSTGRES_HOST: 'db',
       POSTGRES_DB: 'postgres',
-      SITE_URL: `http://localhost:${basePort}`,
-      API_EXTERNAL_URL: `http://localhost:${basePort}`,
+  // Default frontend URL should point at typical dev servers (Vite uses 5173).
+  // Use localhost:5173 by default so magic links from Studio/mailpit open the developer frontend.
+  SITE_URL: `http://localhost:5173`,
+  API_EXTERNAL_URL: `http://localhost:5173`,
       MAILER_URLPATHS_INVITE: '/auth/v1/verify',
       SMTP_HOST: 'inbucket',
       SMTP_PORT: (basePort + 1101).toString(),
       SMTP_ADMIN_EMAIL: 'admin@example.com',
       STUDIO_PORT: (basePort + 100).toString(),
-      SUPABASE_PUBLIC_URL: `http://localhost:${basePort}`,
+  SUPABASE_PUBLIC_URL: `http://localhost:5173`,
       ENABLE_EMAIL_SIGNUP: 'true',
       ENABLE_PHONE_SIGNUP: 'true',
       FUNCTIONS_VERIFY_JWT: 'false',
@@ -364,9 +415,12 @@ export async function createProject(name: string, userId: string, description?: 
         await fs.access(repoCfg)
         await fs.mkdir(projectSupabaseDir, { recursive: true })
         const template = await fs.readFile(repoCfg, 'utf8')
-        await fs.writeFile(projectCfg, template, 'utf8')
-        // Merge initial ports into the copied config so the CLI honors them
-        try { await updateSupabaseConfig(projectDir, defaultEnvVars) } catch {}
+  await fs.writeFile(projectCfg, template, 'utf8')
+  // Intentionally do NOT rewrite the copied config.toml here. The repository
+  // template should contain env(...) placeholders (e.g. env(POSTGRES_PORT))
+  // and we rely on the per-project `.env` to provide values. Avoid modifying
+  // the TOML file to prevent malformed numeric substitutions and parsing
+  // errors in the Supabase CLI.
       } catch {
         // no template present; skip
       }
@@ -403,6 +457,14 @@ export async function updateProjectEnvVars(projectId: string, envVars: Record<st
 
     // Merge: incoming envVars overwrite existing keys; missing keys are preserved
     const mergedEnv: Record<string, string> = { ...existingEnv, ...envVars }
+
+    // Ensure Studio and other SUPABASE_* aliases see the SITE_URL if provided.
+    // Some Supabase components and Studio expect SUPABASE_PUBLIC_URL or SUPABASE_SITE_URL
+    // for constructing magic links. Mirror SITE_URL into SUPABASE_PUBLIC_URL when present.
+    if (mergedEnv.SITE_URL) {
+      if (!mergedEnv.SUPABASE_PUBLIC_URL) mergedEnv.SUPABASE_PUBLIC_URL = mergedEnv.SITE_URL
+      if (!mergedEnv.SUPABASE_SITE_URL) mergedEnv.SUPABASE_SITE_URL = mergedEnv.SITE_URL
+    }
 
     // Upsert all merged env vars into DB (preserve any keys not present in the incoming payload)
     for (const [key, value] of Object.entries(mergedEnv)) {
@@ -485,6 +547,8 @@ export async function deployProject(projectId: string) {
         if (fileEnv.POSTGRES_PORT) portsToCheck.push(Number(fileEnv.POSTGRES_PORT))
         if (fileEnv.STUDIO_PORT) portsToCheck.push(Number(fileEnv.STUDIO_PORT))
         if (fileEnv.INBUCKET_WEB_PORT) portsToCheck.push(Number(fileEnv.INBUCKET_WEB_PORT))
+  if (fileEnv.INBUCKET_SMTP_PORT) portsToCheck.push(Number(fileEnv.INBUCKET_SMTP_PORT))
+  if (fileEnv.INBUCKET_POP3_PORT) portsToCheck.push(Number(fileEnv.INBUCKET_POP3_PORT))
         if (fileEnv.ANALYTICS_PORT) portsToCheck.push(Number(fileEnv.ANALYTICS_PORT))
         if (fileEnv.KONG_HTTP_PORT) portsToCheck.push(Number(fileEnv.KONG_HTTP_PORT))
 
@@ -501,7 +565,7 @@ export async function deployProject(projectId: string) {
         if (occupied.length > 0) {
           // Find a new base port that frees the required offsets
           const initialBase = 8000 + (Date.now() % 10000)
-          const offsets = [0, 100, 1000, 1100, 1101, 2000]
+          const offsets = [0, 100, 1000, 1100, 1101, 1102, 2000]
           const newBase = await findAvailableBasePort(initialBase, offsets, 200)
           if (!newBase) throw new Error('Port(s) in use and unable to find alternative base port. Free ports or configure custom ports in the project settings.')
 
@@ -516,8 +580,10 @@ export async function deployProject(projectId: string) {
           try { await fs.writeFile(envPath, envLines, 'utf8') } catch {}
             try { await fs.writeFile(path.join(projectDockerDir, '.env'), envLines, 'utf8') } catch {}
 
-          // Also update supabase/config.toml if present so CLI picks up the new DB port
-          try { await updateSupabaseConfig(path.join(process.cwd(), 'supabase-projects', project.slug), updatedEnv) } catch {}
+          // Do NOT rewrite supabase/config.toml here. Keep the copied template
+          // untouched and rely on `.env` values (env(...) placeholders) so the CLI
+          // resolves them at runtime. This avoids writing numeric values into the
+          // TOML which can cause parse failures.
 
           // Persist updated env vars into DB
           for (const [k, v] of Object.entries(updatedEnv)) {
@@ -535,7 +601,7 @@ export async function deployProject(projectId: string) {
 
         // Final pre-start verification: re-check ports immediately before starting the CLI.
         // This helps avoid a race where ports become occupied between the initial probe and `supabase start`.
-        const finalOffsets = [0, 100, 1000, 1100, 1101, 2000]
+  const finalOffsets = [0, 100, 1000, 1100, 1101, 1102, 2000]
         const maxRetries = 3
         for (let attempt = 0; attempt < maxRetries; attempt++) {
           const conflicts: number[] = []
@@ -568,11 +634,12 @@ export async function deployProject(projectId: string) {
           fileEnv.ANALYTICS_PORT = String(newBase + 1000)
           fileEnv.INBUCKET_WEB_PORT = String(newBase + 1100)
           fileEnv.INBUCKET_SMTP_PORT = String(newBase + 1101)
+          fileEnv.INBUCKET_POP3_PORT = String(newBase + 1102)
           fileEnv.STUDIO_PORT = String(newBase + 100)
 
-          const newEnvLines = Object.entries(fileEnv).map(([k, v]) => `${k}=${v}`).join('\n')
-          try { await fs.writeFile(envPath, newEnvLines, 'utf8') } catch {}
-          try { await fs.writeFile(path.join(projectDockerDir, '.env'), newEnvLines, 'utf8') } catch {}
+            const envLines = Object.entries(fileEnv).map(([k, v]) => `${k}=${v}`).join('\n')
+          try { await fs.writeFile(envPath, envLines, 'utf8') } catch {}
+          try { await fs.writeFile(path.join(projectDockerDir, '.env'), envLines, 'utf8') } catch {}
 
           for (const [k, v] of Object.entries(fileEnv)) {
             try {
@@ -581,6 +648,11 @@ export async function deployProject(projectId: string) {
               // ignore per-key persistence failures
             }
           }
+
+          // Note: intentionally not updating supabase/config.toml here. Keep the
+          // project TOML template as-is and let the Supabase CLI resolve env(...)
+          // placeholders from the project's .env at runtime. This avoids parsing
+          // and numeric substitution issues.
 
           // update portsToCheck for the next iteration
           portsToCheck.length = 0
@@ -616,7 +688,7 @@ export async function deployProject(projectId: string) {
             }
             // find new base
             const initialBase = 8000 + (Date.now() % 10000)
-            const offsets = [0, 100, 1000, 1100, 1101, 2000]
+            const offsets = [0, 100, 1000, 1100, 1101, 1102, 2000]
             const newBase = await findAvailableBasePort(initialBase, offsets, 200)
             if (!newBase) {
               // Can't find alternative; surface the docker containers owning the ports
@@ -645,7 +717,8 @@ export async function deployProject(projectId: string) {
             const envLines = Object.entries(fileEnv).map(([k, v]) => `${k}=${v}`).join('\n')
             try { await fs.writeFile(envPath, envLines, 'utf8') } catch {}
             try { await fs.writeFile(path.join(projectDockerDir, '.env'), envLines, 'utf8') } catch {}
-            try { await updateSupabaseConfig(path.join(process.cwd(), 'supabase-projects', project.slug), fileEnv) } catch {}
+            // Intentionally not updating supabase/config.toml here to avoid
+            // introducing numeric replacements that may break TOML parsing.
 
             for (const [k, v] of Object.entries(fileEnv)) {
               try { await prisma.projectEnvVar.upsert({ where: { projectId_key: { projectId, key: k } }, update: { value: v }, create: { projectId, key: k, value: v } }) } catch {}
@@ -747,12 +820,20 @@ export async function deployProject(projectId: string) {
           // Persist a selection of runtime values into projectEnvVar rows
           const toPersist: Record<string,string> = {}
           if (statusJson.API_URL) toPersist.API_URL = String(statusJson.API_URL)
+          if (statusJson.GRAPHQL_URL) toPersist.GRAPHQL_URL = String(statusJson.GRAPHQL_URL)
+          if (statusJson.STORAGE_URL) toPersist.STORAGE_URL = String(statusJson.STORAGE_URL)
+          if (statusJson.STORAGE_S3_URL) toPersist.STORAGE_S3_URL = String(statusJson.STORAGE_S3_URL)
+          if (statusJson.S3_ACCESS_KEY) toPersist.S3_ACCESS_KEY = String(statusJson.S3_ACCESS_KEY)
+          if (statusJson.S3_SECRET_KEY) toPersist.S3_SECRET_KEY = String(statusJson.S3_SECRET_KEY)
+          if (statusJson.S3_REGION) toPersist.S3_REGION = String(statusJson.S3_REGION)
+          if (statusJson.MCP_URL) toPersist.MCP_URL = String(statusJson.MCP_URL)
           if (statusJson.STUDIO_URL) toPersist.STUDIO_URL = String(statusJson.STUDIO_URL)
           if (statusJson.INBUCKET_URL) toPersist.INBUCKET_URL = String(statusJson.INBUCKET_URL)
           if (statusJson.MAILPIT_URL) toPersist.MAILPIT_URL = String(statusJson.MAILPIT_URL)
           if (statusJson.DB_URL) toPersist.DB_URL = String(statusJson.DB_URL)
           if (statusJson.JWT_SECRET) toPersist.JWT_SECRET = String(statusJson.JWT_SECRET)
           if (statusJson.PUBLISHABLE_KEY) toPersist.PUBLISHABLE_KEY = String(statusJson.PUBLISHABLE_KEY)
+          if (statusJson.SECRET_KEY) toPersist.SECRET_KEY = String(statusJson.SECRET_KEY)
 
           for (const [k, v] of Object.entries(toPersist)) {
             try {

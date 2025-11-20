@@ -1,0 +1,163 @@
+# Docker Compose for SupaConsole Production Deployment
+# Includes centralized auth option (Authentik) for use across all your lab projects
+
+version: '3.8'
+
+services:
+  # PostgreSQL database for SupaConsole metadata (projects, users, env vars)
+  db:
+    image: postgres:16-alpine
+    container_name: supaconsole-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-supaconsole}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Please set POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-supaconsole}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-supaconsole}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - supaconsole-net
+
+  # SupaConsole application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: supaconsole-app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Database connection
+      DATABASE_URL: postgresql://${POSTGRES_USER:-supaconsole}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-supaconsole}
+      
+      # Next.js configuration
+      NEXT_PUBLIC_APP_URL: ${APP_URL:-http://localhost:3000}
+      NEXTAUTH_URL: ${APP_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Please set NEXTAUTH_SECRET}
+      
+      # OAuth/OIDC for centralized auth (optional - leave empty for local auth)
+      OAUTH_ISSUER: ${OAUTH_ISSUER:-}
+      OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:-}
+      OAUTH_CLIENT_SECRET: ${OAUTH_CLIENT_SECRET:-}
+      OAUTH_AUTHORIZATION_URL: ${OAUTH_AUTHORIZATION_URL:-}
+      OAUTH_TOKEN_URL: ${OAUTH_TOKEN_URL:-}
+      OAUTH_USERINFO_URL: ${OAUTH_USERINFO_URL:-}
+      
+      # Email configuration (optional)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@supaconsole.local}
+      
+      # Node environment
+      NODE_ENV: production
+    volumes:
+      # Mount Docker socket for managing Supabase project containers
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Persistent storage for Supabase projects
+      - supabase_projects:/app/supabase-projects
+    ports:
+      - "${APP_PORT:-3000}:3000"
+    networks:
+      - supaconsole-net
+    labels:
+      # Traefik labels (optional - uncomment if using Traefik)
+      # - "traefik.enable=true"
+      # - "traefik.http.routers.supaconsole.rule=Host(`supaconsole.yourdomain.com`)"
+      # - "traefik.http.routers.supaconsole.entrypoints=websecure"
+      # - "traefik.http.routers.supaconsole.tls.certresolver=letsencrypt"
+      # - "traefik.http.services.supaconsole.loadbalancer.server.port=3000"
+
+  # Authentik - Centralized SSO/Auth for all lab projects (OPTIONAL)
+  # Uncomment this section if you want centralized authentication
+  # authentik-db:
+  #   image: postgres:16-alpine
+  #   container_name: authentik-db
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_USER: ${AUTHENTIK_DB_USER:-authentik}
+  #     POSTGRES_PASSWORD: ${AUTHENTIK_DB_PASSWORD:?Please set AUTHENTIK_DB_PASSWORD}
+  #     POSTGRES_DB: ${AUTHENTIK_DB_NAME:-authentik}
+  #   volumes:
+  #     - authentik_db:/var/lib/postgresql/data
+  #   networks:
+  #     - supaconsole-net
+
+  # authentik-redis:
+  #   image: redis:alpine
+  #   container_name: authentik-redis
+  #   restart: unless-stopped
+  #   networks:
+  #     - supaconsole-net
+
+  # authentik-server:
+  #   image: ghcr.io/goauthentik/server:latest
+  #   container_name: authentik-server
+  #   restart: unless-stopped
+  #   command: server
+  #   depends_on:
+  #     - authentik-db
+  #     - authentik-redis
+  #   environment:
+  #     AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:?Please set AUTHENTIK_SECRET_KEY}
+  #     AUTHENTIK_POSTGRESQL__HOST: authentik-db
+  #     AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB_NAME:-authentik}
+  #     AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-authentik}
+  #     AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+  #     AUTHENTIK_REDIS__HOST: authentik-redis
+  #     AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+  #   volumes:
+  #     - authentik_media:/media
+  #     - authentik_templates:/templates
+  #   ports:
+  #     - "${AUTHENTIK_PORT_HTTP:-9000}:9000"
+  #     - "${AUTHENTIK_PORT_HTTPS:-9443}:9443"
+  #   networks:
+  #     - supaconsole-net
+
+  # authentik-worker:
+  #   image: ghcr.io/goauthentik/server:latest
+  #   container_name: authentik-worker
+  #   restart: unless-stopped
+  #   command: worker
+  #   depends_on:
+  #     - authentik-db
+  #     - authentik-redis
+  #   environment:
+  #     AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY}
+  #     AUTHENTIK_POSTGRESQL__HOST: authentik-db
+  #     AUTHENTIK_POSTGRESQL__NAME: ${AUTHENTIK_DB_NAME:-authentik}
+  #     AUTHENTIK_POSTGRESQL__USER: ${AUTHENTIK_DB_USER:-authentik}
+  #     AUTHENTIK_POSTGRESQL__PASSWORD: ${AUTHENTIK_DB_PASSWORD}
+  #     AUTHENTIK_REDIS__HOST: authentik-redis
+  #     AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+  #   volumes:
+  #     - authentik_media:/media
+  #     - authentik_templates:/templates
+  #   networks:
+  #     - supaconsole-net
+
+volumes:
+  postgres_data:
+    driver: local
+  supabase_projects:
+    driver: local
+  # Authentik volumes (uncomment if using Authentik)
+  # authentik_db:
+  #   driver: local
+  # authentik_media:
+  #   driver: local
+  # authentik_templates:
+  #   driver: local
+
+networks:
+  supaconsole-net:
+    driver: bridge

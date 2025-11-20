@@ -104,17 +104,25 @@ export default function DashboardPage() {
       if (statusResp.ok) {
         const statusData = await statusResp.json()
         const status = statusData.status || {}
-        const urls: Record<string, string> = {}
-        if (status['API_URL']) urls['API Gateway'] = String(status['API_URL'])
-        if (status['STUDIO_URL']) urls['Supabase Studio'] = String(status['STUDIO_URL'])
-        // Analytics / Mail UI
-        if (status['INBUCKET_URL']) urls['Inbucket (Mail UI)'] = String(status['INBUCKET_URL'])
-        if (status['MAILPIT_URL']) urls['Inbucket (Mail UI)'] = String(status['MAILPIT_URL'])
-        if (status['MAILPIT_URL'] && !urls['Inbucket (Mail UI)']) urls['Inbucket (Mail UI)'] = String(status['MAILPIT_URL'])
-        if (status['STORAGE_S3_URL']) urls['Storage (S3)'] = String(status['STORAGE_S3_URL'])
-        if (status['PUBLISHABLE_KEY']) urls['Publishable Key'] = String(status['PUBLISHABLE_KEY'])
-        // Database: construct from DB_URL if available
-        if (status['DB_URL']) urls['Database'] = String(status['DB_URL'])
+  const urls: Record<string, string> = {}
+  if (status['API_URL']) urls['API Gateway'] = String(status['API_URL'])
+  if (status['GRAPHQL_URL']) urls['GraphQL'] = String(status['GRAPHQL_URL'])
+  if (status['STORAGE_URL']) urls['Storage (Base)'] = String(status['STORAGE_URL'])
+  if (status['STORAGE_S3_URL']) urls['Storage (S3)'] = String(status['STORAGE_S3_URL'])
+  if (status['MCP_URL']) urls['MCP'] = String(status['MCP_URL'])
+  if (status['STUDIO_URL']) urls['Supabase Studio'] = String(status['STUDIO_URL'])
+  // Analytics / Mail UI
+  if (status['INBUCKET_URL']) urls['Inbucket (Mail UI)'] = String(status['INBUCKET_URL'])
+  if (status['MAILPIT_URL']) urls['Mail UI (Mailpit)'] = String(status['MAILPIT_URL'])
+  if (status['MAILPIT_URL'] && !urls['Inbucket (Mail UI)']) urls['Inbucket (Mail UI)'] = String(status['MAILPIT_URL'])
+  // Keys and DB
+  if (status['PUBLISHABLE_KEY']) urls['Publishable Key'] = String(status['PUBLISHABLE_KEY'])
+  if (status['SECRET_KEY']) urls['Secret Key'] = String(status['SECRET_KEY'])
+  if (status['S3_ACCESS_KEY']) urls['S3 Access Key'] = String(status['S3_ACCESS_KEY'])
+  if (status['S3_SECRET_KEY']) urls['S3 Secret Key'] = String(status['S3_SECRET_KEY'])
+  if (status['S3_REGION']) urls['S3 Region'] = String(status['S3_REGION'])
+  // Database: construct from DB_URL if available
+  if (status['DB_URL']) urls['Database'] = String(status['DB_URL'])
 
         // If we have any runtime URLs, prefer them
         if (Object.keys(urls).length > 0) {
@@ -430,7 +438,13 @@ export default function DashboardPage() {
                           </svg>
                         </a>
 
-                        {/* Copy password removed — deprecated UI element */}
+                        <button
+                          onClick={async () => { await navigator.clipboard.writeText(url) }}
+                          className="text-sm text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200"
+                          title="Copy"
+                        >
+                          Copy
+                        </button>
                       </div>
                     </div>
                   ))}

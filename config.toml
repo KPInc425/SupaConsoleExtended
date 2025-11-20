@@ -96,7 +96,7 @@ enabled = true
 port = "env(INBUCKET_WEB_PORT)"
 # Uncomment to expose additional ports for testing user applications that send emails.
 smtp_port = "env(INBUCKET_SMTP_PORT)"
-pop3_port = 54326
+pop3_port = "env(INBUCKET_POP3_PORT)"
 admin_email = "admin@email.com"
 sender_name = "Admin"
 
@@ -119,10 +119,12 @@ file_size_limit = "50MiB"
 [auth]
 enabled = true
 # The base URL of your website. Used as an allow-list for redirects and for constructing URLs used
-# in emails.
-site_url = "http://127.0.0.1:3000"
+# in emails. Make this driven by the project's .env so devs can set their frontend host (e.g. Vite at 5173).
+# Use the CLI-supported env(...) placeholder so the per-project .env controls the value.
+site_url = "env(SITE_URL)"
 # A list of *exact* URLs that auth providers are permitted to redirect to post authentication.
-additional_redirect_urls = ["https://127.0.0.1:3000"]
+# We recommend using the env-driven placeholder so per-project .env controls allowed redirects.
+additional_redirect_urls = ["env(SITE_URL)"]
 # How long tokens are valid for, in seconds. Defaults to 3600 (1 hour), maximum 604,800 (1 week).
 jwt_expiry = 3600
 # Path to JWT signing key. DO NOT commit your signing keys file to git.
