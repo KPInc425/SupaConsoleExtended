@@ -6,6 +6,10 @@ import { prisma } from './db'
 import { isSupabaseCliAvailable } from './cli'
 import TOML from '@iarna/toml'
 import * as net from 'net'
+import { rewriteLoopbackSshUriForContainer } from './containerHost'
+import { ensureKnownHostForDockerHost, getDockerSshCommand } from './sshKnownHosts'
+import { ensurePodmanDockerApiOnWindows } from './podmanDockerApi'
+import { disableSupabaseAnalytics } from './supabaseConfig'
 
 const execAsync = promisify(exec)
 
@@ -670,13 +674,64 @@ export async function deployProject(projectId: string) {
     try {
       // Provide a unique compose project name to avoid Docker stack/network collisions
       const spawnEnvBase = { ...(process.env as Record<string,string>), COMPOSE_PROJECT_NAME: `supa_${project.slug}` }
+      // If Docker daemon isn't running locally, try to detect a Podman connection
+      // and expose a Docker-compatible API for the CLI via DOCKER_HOST.
+      let dockerDaemonRunning = false
+      try {
+        // If docker info succeeds, docker daemon is available
+        await execAsync('docker info', { timeout: 2000 })
+        dockerDaemonRunning = true
+      } catch {
+        dockerDaemonRunning = false
+      }
+
+      const spawnEnvWithRuntime = { ...spawnEnvBase } as Record<string,string>
+      if (!dockerDaemonRunning) {
+        try {
+          // Prefer PODMAN connection list default
+          const connOutput = await execAsync('podman system connection list --format json', { timeout: 2000 })
+          const parsed = JSON.parse(String(connOutput.stdout || '[]')) as Array<Record<string, unknown>>
+          const connections = parsed.map((c) => ({ URI: typeof c.URI === 'string' ? String(c.URI) : undefined, Identity: typeof c.Identity === 'string' ? String(c.Identity) : undefined, Default: typeof c.Default === 'boolean' ? c.Default : false }))
+          const selected = connections.find(c => c.Default) || connections[0]
+          let dockerHostEnv = selected?.URI || ''
+          const dockerSshIdentity = selected?.Identity
+          if (dockerHostEnv) {
+            const rewritten = await rewriteLoopbackSshUriForContainer(dockerHostEnv)
+            if (rewritten.changed) dockerHostEnv = rewritten.uri
+          }
+
+          if (process.platform === 'win32' && dockerHostEnv && dockerHostEnv.startsWith('ssh://')) {
+            const ensured = await ensurePodmanDockerApiOnWindows({ uri: dockerHostEnv, identityFile: dockerSshIdentity }, 23751)
+            spawnEnvWithRuntime.DOCKER_HOST = ensured.dockerHost
+            if (ensured.message) console.log('[INFO] Podman Docker API:', ensured.message)
+
+            // Disable analytics which commonly fails under Podman on Windows
+            try {
+              const disabled = await disableSupabaseAnalytics(projectRoot)
+              if (disabled) console.log('[INFO] Disabled Supabase analytics for Podman compatibility')
+            } catch (e) {
+              console.warn('Failed to disable analytics:', e)
+            }
+          } else if (dockerHostEnv) {
+            // Non-Windows: set DOCKER_HOST directly if provided (e.g., ssh://... but not tunneled)
+            spawnEnvWithRuntime.DOCKER_HOST = dockerHostEnv
+            if (dockerHostEnv.startsWith('ssh://')) {
+              const ensured = ensureKnownHostForDockerHost(dockerHostEnv)
+              if (!ensured.ok) console.warn('SSH known_hosts preparation failed:', ensured.message)
+              spawnEnvWithRuntime.DOCKER_SSH_COMMAND = getDockerSshCommand(dockerSshIdentity)
+            }
+          }
+        } catch {
+          // Podman not available or detection failed; proceed without setting DOCKER_HOST
+        }
+      }
       const maxRetriesStart = 3
       let attempt = 0
       let started = false
       while (attempt < maxRetriesStart && !started) {
         try {
           attempt += 1
-          await execAsync('supabase start', { cwd: projectRoot, timeout: 1000 * 60 * 10, maxBuffer: 1024 * 1024 * 10, env: spawnEnvBase as unknown as NodeJS.ProcessEnv })
+          await execAsync('supabase start', { cwd: projectRoot, timeout: 1000 * 60 * 10, maxBuffer: 1024 * 1024 * 10, env: spawnEnvWithRuntime as unknown as NodeJS.ProcessEnv })
           started = true
           break
         } catch (err) {

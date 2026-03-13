@@ -1,0 +1,17 @@
+{
+  "version": "1.0.0",
+  "prompts": [
+    {
+      "url": "https://github.com/10GeekJames/AIDevBridge-GlobalPromptCatalog-General",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    }
+  ],
+  "straightline": [
+    {
+      "url": "https://github.com/10GeekJames/AIDevBridge-StraightLine-Product_UptimeMonitor.git",
+      "branch": "main",
+      "localFolder": "repos/straightline"
+    }
+  ]
+}

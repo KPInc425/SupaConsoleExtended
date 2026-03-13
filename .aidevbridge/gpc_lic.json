@@ -1,0 +1,111 @@
+{
+  "version": "1.0.0",
+  "prompts": [
+    {
+      "url": "https://github.com/10GeekJames/AIDevBridge-GlobalPromptCatalog-General",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_AutoRunner_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_GlobalPromptCatalog_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_AIDevBridge_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_AutoPromptEDO_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_StraightLinePMM_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_TheKit_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_RapidPrototyping_Demo",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_RapidPrototyping_Basic",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_RapidPrototyping_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_LocalhostMCP_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_SecurityPatterns_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_EnterpriseDX_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_Dotnet_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_Router",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_RapidPrototyping_HTML",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_RapidPrototyping_Svelt",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_RapidPrototyping_Blazor",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_AutoRunner_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_TheMindAndBrain_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    },
+    {
+      "url": "https://github.com/Alloc42/GPC_Alloc42_DevAITechniques_Advanced",
+      "branch": "main",
+      "localFolder": "repos/prompts"
+    }
+  ],
+  "straightline": []
+}
