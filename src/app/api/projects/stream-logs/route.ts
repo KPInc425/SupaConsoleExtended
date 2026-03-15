@@ -4,6 +4,7 @@ import * as path from 'path'
 import { validateSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
 import { isPortAvailable, findAvailableBasePort } from '@/lib/project'
+import { getProjectFilesystemLayout } from '@/lib/instances/metadata'
 import * as fs from 'fs/promises'
 // no exec required here; using spawn for streaming
 
@@ -35,7 +36,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
     }
 
-    const projectDir = path.join(process.cwd(), 'supabase-projects', project.slug)
+    const layout = getProjectFilesystemLayout(project)
+    const projectDir = path.join(process.cwd(), layout.projectRootRelative)
 
     // Create a response with streaming headers for Server-Sent Events
     const encoder = new TextEncoder()
@@ -106,7 +108,7 @@ export async function POST(request: NextRequest) {
 
           const envLines = Object.entries(fileEnv).map(([k,v]) => `${k}=${v}`).join('\n')
           try { await fs.writeFile(envPath, envLines, 'utf8') } catch {}
-          try { await fs.writeFile(path.join(projectDir, 'docker', '.env'), envLines, 'utf8') } catch {}
+          try { await fs.writeFile(path.join(process.cwd(), layout.dockerDirRelative, '.env'), envLines, 'utf8') } catch {}
           // Do NOT modify supabase/config.toml here. Keep the template intact and
           // rely on env(...) placeholders and the project's .env for runtime values.
 
@@ -122,7 +124,7 @@ export async function POST(request: NextRequest) {
 
         // Now spawn supabase start and stream output with retry-on-port-conflict
         const spawnWithEnv = (envOverride?: Record<string,string>) => {
-          const spawnEnv = { ...(process.env as Record<string,string>), COMPOSE_PROJECT_NAME: `supa_${project.slug}`, ...(envOverride || {}) }
+          const spawnEnv = { ...(process.env as Record<string,string>), COMPOSE_PROJECT_NAME: layout.composeProjectName, ...(envOverride || {}) }
           return spawn('supabase', ['start'], {
             cwd: projectDir,
             shell: true,
@@ -202,7 +204,7 @@ export async function POST(request: NextRequest) {
 
               const envLines = Object.entries(fileEnv).map(([k,v]) => `${k}=${v}`).join('\n')
               try { await fs.writeFile(envPath, envLines, 'utf8') } catch {}
-              try { await fs.writeFile(path.join(projectDir, 'docker', '.env'), envLines, 'utf8') } catch {}
+              try { await fs.writeFile(path.join(process.cwd(), layout.dockerDirRelative, '.env'), envLines, 'utf8') } catch {}
               // Only update supabase/config.toml if it already exists to avoid creating an invalid file
               try {
                 const cfgPath = path.join(projectDir, 'supabase', 'config.toml')

@@ -3,13 +3,9 @@ import { NextRequest, NextResponse } from 'next/server'
 interface RouteContext {
   params: Promise<{ id: string }>
 }
-import { exec } from 'child_process'
-import { promisify } from 'util'
-import * as path from 'path'
 import { validateSession } from '@/lib/auth'
 import { prisma } from '@/lib/db'
-
-const execAsync = promisify(exec)
+import { inspectProject } from '@/lib/project'
 
 export async function GET(request: NextRequest, { params }: RouteContext) {
   try {
@@ -27,19 +23,15 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
     if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
     if (project.ownerId !== session.user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
 
-    const projectDir = path.join(process.cwd(), 'supabase-projects', project.slug)
-
-    try {
-      const { stdout } = await execAsync('supabase status -o json --workdir .', { cwd: projectDir, timeout: 20000, maxBuffer: 1024 * 1024 * 2 })
-      try {
-        const json = JSON.parse(stdout)
-        return NextResponse.json({ status: json })
-      } catch {
-        return NextResponse.json({ error: 'Failed to parse supabase status output', raw: stdout }, { status: 500 })
-      }
-    } catch (cliErr) {
-      return NextResponse.json({ error: 'Supabase CLI status failed', detail: String(cliErr) }, { status: 500 })
+    const result = await inspectProject(project.id)
+    if (!result.success) {
+      return NextResponse.json(
+        { error: result.error, runtimeStatus: result.runtimeStatus },
+        { status: result.code === 'unsupported_mode' || result.code === 'validation_error' ? 400 : 500 },
+      )
     }
+
+    return NextResponse.json({ status: result.status, runtimeStatus: result.runtimeStatus, note: result.note })
   } catch (error) {
     console.error('Project status error:', error)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })

@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
@@ -45,6 +45,14 @@ model Project {
   slug        String   @unique
   description String?
   status      String   @default("active") // active, paused, stopped
+  provisioningMode String @default("full_stack_isolated")
+  topologyKind     String @default("isolated_stack")
+  runtimeKind      String @default("supabase_cli_local")
+  runtimeStatus    String @default("created")
+  topologyMetadata Json?
+  runtimeMetadata  Json?
+  portAllocation   Json?
+  secretMetadata   Json?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   
@@ -62,6 +70,9 @@ model ProjectEnvVar {
   id        String   @id @default(uuid())
   key       String
   value     String
+  valueSource    String @default("inline")
+  secretReference String?
+  secretMetadata  Json?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   

@@ -1,0 +1,10 @@
+{
+  "name": "local-shared",
+  "defaultMode": "full_stack_isolated",
+  "sharedPostgres": {
+    "port": 5432,
+    "adminDatabase": "postgres",
+    "schemaDatabase": "postgres"
+  },
+  "sharedServices": {}
+}

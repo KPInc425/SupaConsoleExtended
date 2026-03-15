@@ -9,6 +9,20 @@ interface RouteContext {
   }>
 }
 
+async function resolveOwnedProject(projectId: string, sessionUserId: string) {
+  const project = await prisma.project.findUnique({ where: { id: projectId } })
+
+  if (!project) {
+    return { error: NextResponse.json({ error: 'Project not found' }, { status: 404 }) }
+  }
+
+  if (project.ownerId !== sessionUserId) {
+    return { error: NextResponse.json({ error: 'Forbidden' }, { status: 403 }) }
+  }
+
+  return { project }
+}
+
 export async function GET(request: NextRequest, { params }: RouteContext) {
   const { id } = await params
   try {
@@ -27,6 +41,11 @@ export async function GET(request: NextRequest, { params }: RouteContext) {
         { error: 'Invalid session' },
         { status: 401 }
       )
+    }
+
+    const ownership = await resolveOwnedProject(id, session.user.id)
+    if (ownership.error) {
+      return ownership.error
     }
 
     // Fetch project environment variables from database
@@ -70,6 +89,11 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       )
     }
 
+    const ownership = await resolveOwnedProject(id, session.user.id)
+    if (ownership.error) {
+      return ownership.error
+    }
+
     const envVars = await request.json()
 
     if (!envVars || typeof envVars !== 'object') {
@@ -92,7 +116,7 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
     if (!result.success) {
       return NextResponse.json(
         { error: result.error },
-        { status: 500 }
+        { status: result.code === 'validation_error' || result.code === 'unsupported_mode' ? 400 : 500 }
       )
     }
 

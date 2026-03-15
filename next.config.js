@@ -1,12 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: 'standalone',
+  allowedDevOrigins: ['127.0.0.1'],
   experimental: {
-    turbo: {
-      rules: {
-        '*.ts': ['babel-loader'],
-        '*.tsx': ['babel-loader'],
-      },
-    },
+    externalDir: true,
   },
   typescript: {
     ignoreBuildErrors: false,
@@ -18,10 +15,6 @@ const nextConfig = {
       exclude: [/supabase-core/, /supabase-projects/],
     })
     return config
-  },
-  // Exclude supabase-core from compilation
-  experimental: {
-    externalDir: true,
   },
 }
 

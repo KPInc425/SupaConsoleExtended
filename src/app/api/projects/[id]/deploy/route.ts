@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { validateSession } from '@/lib/auth'
 import { deployProject } from '@/lib/project'
+import { prisma } from '@/lib/db'
 
 interface RouteContext {
   params: Promise<{
@@ -28,10 +29,22 @@ export async function POST(request: NextRequest, { params }: RouteContext) {
       )
     }
 
-  const result: { success: boolean; status?: unknown; note?: string; error?: string } = await deployProject(id)
+    const project = await prisma.project.findUnique({ where: { id } })
+    if (!project) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+
+    if (project.ownerId !== session.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
+    }
+
+  const result: { success: boolean; status?: unknown; note?: string; error?: string; code?: string } = await deployProject(id)
 
     if (!result.success) {
-      return NextResponse.json({ error: result.error }, { status: 500 })
+      return NextResponse.json(
+        { error: result.error },
+        { status: result.code === 'unsupported_mode' || result.code === 'validation_error' ? 400 : 500 },
+      )
     }
 
     // If deployProject returned runtime status, include it so the UI can show URLs

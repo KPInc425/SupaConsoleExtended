@@ -1,28 +1,7 @@
-# Docker Compose for SupaConsole Production Deployment
-# Includes centralized auth option (Authentik) for use across all your lab projects
-
-version: '3.8'
+# Docker Compose for the SupaConsole control plane.
+# Use deploy/docker-compose.production.yml when you want the bundled NGINX reverse-proxy path.
 
 services:
-  # PostgreSQL database for SupaConsole metadata (projects, users, env vars)
-  db:
-    image: postgres:16-alpine
-    container_name: supaconsole-db
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-supaconsole}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Please set POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB:-supaconsole}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-supaconsole}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - supaconsole-net
-
   # SupaConsole application
   app:
     build:
@@ -30,18 +9,36 @@ services:
       dockerfile: Dockerfile
     container_name: supaconsole-app
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
     environment:
-      # Database connection
-      DATABASE_URL: postgresql://${POSTGRES_USER:-supaconsole}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-supaconsole}
-      
-      # Next.js configuration
-      NEXT_PUBLIC_APP_URL: ${APP_URL:-http://localhost:3000}
-      NEXTAUTH_URL: ${APP_URL:-http://localhost:3000}
-      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:?Please set NEXTAUTH_SECRET}
-      
+      # Control plane metadata store
+      DATABASE_URL: ${DATABASE_URL:-file:/app/.supaconsole/control-plane.db}
+
+      # App runtime configuration
+      APP_NAME: ${APP_NAME:-SupaConsole}
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      APP_PORT: ${APP_PORT:-3000}
+
+      # Phase 4 operational surfaces
+      SUPACONSOLE_TOPOLOGY_SETTINGS_FILE: ${SUPACONSOLE_TOPOLOGY_SETTINGS_FILE:-.supaconsole/shared-topology.json}
+      SUPACONSOLE_SECRET_FILE: ${SUPACONSOLE_SECRET_FILE:-.supaconsole/secrets.json}
+      SUPACONSOLE_BACKUP_DIR: ${SUPACONSOLE_BACKUP_DIR:-.supaconsole/backups}
+      SUPACONSOLE_LIFECYCLE_LOG_FILE: ${SUPACONSOLE_LIFECYCLE_LOG_FILE:-.supaconsole/logs/lifecycle.jsonl}
+      SUPACONSOLE_PROJECT_JWT_SECRET: ${SUPACONSOLE_PROJECT_JWT_SECRET:-}
+
+      # Optional shared-topology bootstrap values
+      SUPACONSOLE_SHARED_TOPOLOGY_NAME: ${SUPACONSOLE_SHARED_TOPOLOGY_NAME:-}
+      SUPACONSOLE_DEFAULT_INSTANCE_MODE: ${SUPACONSOLE_DEFAULT_INSTANCE_MODE:-full_stack_isolated}
+      SUPACONSOLE_SHARED_PG_ADMIN_URL: ${SUPACONSOLE_SHARED_PG_ADMIN_URL:-}
+      SUPACONSOLE_SHARED_PG_SCHEMA_DATABASE: ${SUPACONSOLE_SHARED_PG_SCHEMA_DATABASE:-}
+      SUPACONSOLE_SHARED_PG_ADMIN_DATABASE: ${SUPACONSOLE_SHARED_PG_ADMIN_DATABASE:-}
+      SUPACONSOLE_SHARED_SERVICE_API_URL: ${SUPACONSOLE_SHARED_SERVICE_API_URL:-}
+      SUPACONSOLE_SHARED_SERVICE_STUDIO_URL: ${SUPACONSOLE_SHARED_SERVICE_STUDIO_URL:-}
+      SUPACONSOLE_SHARED_SERVICE_DATABASE_URL: ${SUPACONSOLE_SHARED_SERVICE_DATABASE_URL:-}
+      SUPACONSOLE_SHARED_SERVICE_AUTH_URL: ${SUPACONSOLE_SHARED_SERVICE_AUTH_URL:-}
+      SUPACONSOLE_SHARED_SERVICE_STORAGE_URL: ${SUPACONSOLE_SHARED_SERVICE_STORAGE_URL:-}
+      SUPACONSOLE_SHARED_SERVICE_REALTIME_URL: ${SUPACONSOLE_SHARED_SERVICE_REALTIME_URL:-}
+      SUPACONSOLE_SHARED_SERVICE_MAIL_URL: ${SUPACONSOLE_SHARED_SERVICE_MAIL_URL:-}
+
       # OAuth/OIDC for centralized auth (optional - leave empty for local auth)
       OAUTH_ISSUER: ${OAUTH_ISSUER:-}
       OAUTH_CLIENT_ID: ${OAUTH_CLIENT_ID:-}
@@ -53,28 +50,24 @@ services:
       # Email configuration (optional)
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
       SMTP_USER: ${SMTP_USER:-}
-      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
-      SMTP_FROM: ${SMTP_FROM:-noreply@supaconsole.local}
+      SMTP_PASS: ${SMTP_PASS:-}
       
       # Node environment
       NODE_ENV: production
     volumes:
       # Mount Docker socket for managing Supabase project containers
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
+      # Persist Phase 4 operational data for config, secrets, backups, and lifecycle logs
+      - supaconsole_state:/app/.supaconsole
       # Persistent storage for Supabase projects
       - supabase_projects:/app/supabase-projects
     ports:
       - "${APP_PORT:-3000}:3000"
     networks:
       - supaconsole-net
-    labels:
-      # Traefik labels (optional - uncomment if using Traefik)
-      # - "traefik.enable=true"
-      # - "traefik.http.routers.supaconsole.rule=Host(`supaconsole.yourdomain.com`)"
-      # - "traefik.http.routers.supaconsole.entrypoints=websecure"
-      # - "traefik.http.routers.supaconsole.tls.certresolver=letsencrypt"
-      # - "traefik.http.services.supaconsole.loadbalancer.server.port=3000"
+    # Traefik labels can be added here if you deploy behind Traefik instead of the bundled NGINX example.
 
   # Authentik - Centralized SSO/Auth for all lab projects (OPTIONAL)
   # Uncomment this section if you want centralized authentication
@@ -146,7 +139,7 @@ services:
   #     - supaconsole-net
 
 volumes:
-  postgres_data:
+  supaconsole_state:
     driver: local
   supabase_projects:
     driver: local

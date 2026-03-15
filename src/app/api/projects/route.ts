@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { prisma } from '@/lib/db'
 import { validateSession } from '@/lib/auth'
-import { createProject } from '@/lib/project'
+import { createProject, listProjectBackups } from '@/lib/project'
+import { buildProjectViewModel } from '@/lib/instances/presentation'
 
 export async function GET(request: NextRequest) {
   try {
@@ -27,7 +28,14 @@ export async function GET(request: NextRequest) {
       orderBy: { createdAt: 'desc' },
     })
 
-    return NextResponse.json({ projects })
+    const projectsWithView = await Promise.all(
+      projects.map(async (project) => {
+        const backups = await listProjectBackups(project.id).catch(() => [])
+        return buildProjectViewModel(project, backups.length)
+      }),
+    )
+
+    return NextResponse.json({ projects: projectsWithView })
   } catch (error) {
     console.error('Get projects error:', error)
     return NextResponse.json(
@@ -56,7 +64,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { name, description = '' } = await request.json()
+    const { name, description = '', mode, topology, runtimeKind, selection } = await request.json()
 
     if (!name) {
       return NextResponse.json(
@@ -65,12 +73,17 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const result = await createProject(name, session.user.id, description)
+    const result = await createProject(name, session.user.id, description, {
+      mode,
+      topology,
+      runtimeKind,
+      selection,
+    })
 
     if (!result.success) {
       return NextResponse.json(
         { error: result.error },
-        { status: 500 }
+        { status: result.code === 'unsupported_mode' || result.code === 'validation_error' ? 400 : 500 }
       )
     }
 

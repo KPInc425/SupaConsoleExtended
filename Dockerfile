@@ -28,8 +28,8 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 
-# Install Docker CLI for managing Supabase projects (required for project lifecycle)
-RUN apk add --no-cache docker-cli docker-cli-compose
+# Install runtime tooling required for managed project lifecycle and backup/restore drills.
+RUN apk add --no-cache docker-cli docker-cli-compose postgresql-client
 
 # Install Supabase CLI (required for orchestrating local Supabase instances)
 RUN apk add --no-cache curl && \
@@ -54,8 +54,8 @@ COPY --from=builder /app/prisma ./prisma
 # Copy startup scripts
 COPY --from=builder /app/package.json ./package.json
 
-# Create directories for Supabase projects with proper permissions
-RUN mkdir -p /app/supabase-projects && \
+# Create directories for generated project workspaces and operational state with proper permissions
+RUN mkdir -p /app/supabase-projects /app/.supaconsole && \
     chown -R nextjs:nodejs /app
 
 USER nextjs
